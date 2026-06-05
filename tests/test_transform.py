@@ -407,8 +407,29 @@ def test_pd_bills_per_company_files_tie_to_bills_tab():
              InitialTicketCostTotal=0, TicketCostTotal=60),
     ]
     res = processor.process_files([(_to_xlsx_bytes(rows), "f.xlsx")])
+    out = processor.build_filtered_outputs(
+        res["_cleaned"], res["_source_view"], res["_excluded_view"],
+        res["date_range"], res["all_companies"],
+    )
     # One bills file per company with positive adjustments.
-    assert set(res["bills_files"].keys()) == {"YSA", "Katz"}
+    assert set(out["bills_files"].keys()) == {"YSA", "Katz"}
+
+
+def test_build_filtered_outputs_respects_selection():
+    rows = [
+        _row(PurchaseOrderID=1, CompanyName="YSA", PerformerName="A", AccountEmail="a@b.com",
+             InitialTicketCostTotal=0, TicketCostTotal=100),
+        _row(PurchaseOrderID=2, CompanyName="YS Katz", PerformerName="B", AccountEmail="b@b.com",
+             InitialTicketCostTotal=0, TicketCostTotal=60),
+    ]
+    res = processor.process_files([(_to_xlsx_bytes(rows), "f.xlsx")])
+    # Select only YSA → only YSA's bills file is produced.
+    out = processor.build_filtered_outputs(
+        res["_cleaned"], res["_source_view"], res["_excluded_view"],
+        res["date_range"], ["YSA"],
+    )
+    assert set(out["bills_files"].keys()) == {"YSA"}
+    assert out["combined"]
 
 
 def test_memo_includes_single_created_date():
@@ -480,10 +501,14 @@ def test_company_files_are_expenses_only():
              AccountEmail="a@b.com", InitialTicketCostTotal=100, TicketCostTotal=20),  # -80 expense
     ]
     res = processor.process_files([(_to_xlsx_bytes(rows), "f.xlsx")])
+    out = processor.build_filtered_outputs(
+        res["_cleaned"], res["_source_view"], res["_excluded_view"],
+        res["date_range"], res["all_companies"],
+    )
     # File/label is the short "GK"; the sheet is Expenses-only.
-    assert "GK" in res["companies"]
+    assert "GK" in out["companies"]
     import openpyxl, io as _io
-    wb = openpyxl.load_workbook(_io.BytesIO(res["companies"]["GK"]))
+    wb = openpyxl.load_workbook(_io.BytesIO(out["companies"]["GK"]))
     assert wb.sheetnames == ["Expenses"]
     ws = wb.active
     h = [c.value for c in ws[1]]
@@ -615,5 +640,9 @@ def test_blank_created_date_is_not_a_same_day_match():
 def test_real_samples_reconcile():
     files = [(open(f, "rb").read(), os.path.basename(f)) for f in sorted(glob.glob(SAMPLE_GLOB))]
     res = processor.process_files(files)
-    assert res["combined"]
+    out = processor.build_filtered_outputs(
+        res["_cleaned"], res["_source_view"], res["_excluded_view"],
+        res["date_range"], res["all_companies"],
+    )
+    assert out["combined"]
     assert res["stats"]["Combined"]["rows"] > 0

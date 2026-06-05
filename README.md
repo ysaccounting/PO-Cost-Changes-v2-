@@ -64,11 +64,21 @@ gunicorn app:app --workers 1 --worker-class gthread --threads 4 --timeout 120
 
 1. User drops one or more new-export `.xlsx` / `.xlsm` / `.csv` files.
 2. `POST /upload` saves them and kicks off a background thread running
-   `process_files()`.
+   `process_files()`, which computes the data + per-company stats and pickles
+   the intermediate DataFrames (it does **not** build the output files yet).
 3. UI polls `GET /status/<job_id>` until `done` or `error`.
-4. On done, the UI shows a date-range badge (US Central), a summary table
-   (Combined + one row per QBO company), a "Download All (.zip)" button, and a
-   grid of per-company download buttons.
+4. On done, the UI opens a **"Select companies"** modal (checkbox list of every
+   QBO company, with Select all). The user picks which companies to include.
+5. `POST /configure/<job_id>` with the selected companies runs
+   `build_filtered_outputs()`, which builds the combined workbook, per-company
+   Expenses files, and per-company bills files for just those companies, and
+   writes them to disk.
+6. The UI then shows a date-range badge (US Central), a summary table, a
+   "Download All (.zip)" button, and grids of per-company download buttons.
+
+In the combined workbook, **Source Data and Excluded are always the full
+upload**; the Combined, Summary, Bills, and per-company tabs reflect only the
+selected companies.
 
 ## New-export columns used
 
@@ -237,11 +247,12 @@ ones on Ticketmaster AM) are kept.
 |--------|------|---------|
 | GET | `/` | HTML drag-and-drop UI |
 | POST | `/upload` | `{job_id}` — kicks off background processing |
-| GET | `/status/<job_id>` | `{status, date_range, companies, all_companies, stats, excluded, ignored_companies, ...}` |
+| GET | `/status/<job_id>` | `{status, date_range, all_companies, stats, excluded, ignored_companies, ...}` |
+| POST | `/configure/<job_id>` | `{selected_companies}` → builds the chosen companies' files; returns `{status, companies, bills_companies, ...}` |
 | GET | `/download/<job_id>/combined` | combined multi-tab xlsx |
-| GET | `/download/<job_id>/company/<name>` | one company's xlsx |
+| GET | `/download/<job_id>/company/<name>` | one company's Expenses xlsx |
 | GET | `/download/<job_id>/bills/<name>` | one company's PD-format bills xlsx |
-| GET | `/download/<job_id>/all` | zip of combined + all per-company files |
+| GET | `/download/<job_id>/all` | zip of combined + selected per-company files |
 
 ## Timezone
 

@@ -12,11 +12,12 @@ import zipfile
 import threading
 import uuid
 import tempfile
+import pickle
 import logging
 
 from flask import Flask, request, jsonify, send_file, render_template
 
-from processor import process_files
+from processor import process_files, build_filtered_outputs
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("po-cost-changes")
@@ -59,49 +60,42 @@ def read_meta(job_id: str) -> dict | None:
 
 
 def run_job(job_id: str, file_list: list[tuple[bytes, str]]) -> None:
-    """Background worker — write all artifacts to disk and update status."""
+    """Background worker — process the upload, then pickle the intermediate
+    data so build_filtered_outputs() can build the chosen companies' files
+    once the user picks them in the selection modal."""
     try:
         result = process_files(file_list)
         d = job_dir(job_id)
+        os.makedirs(d, exist_ok=True)
 
-        with open(os.path.join(d, "combined.xlsx"), "wb") as f:
-            f.write(result["combined"])
-
-        companies_dir = os.path.join(d, "companies")
-        os.makedirs(companies_dir, exist_ok=True)
-        for company, data in result["companies"].items():
-            safe = company.replace("/", "_").replace("\\", "_")
-            with open(os.path.join(companies_dir, f"{safe}.xlsx"), "wb") as f:
-                f.write(data)
-
-        # Per-company PD-format bills files (additional outputs).
-        bills_dir = os.path.join(d, "bills")
-        os.makedirs(bills_dir, exist_ok=True)
-        for company, data in result.get("bills_files", {}).items():
-            safe = company.replace("/", "_").replace("\\", "_")
-            with open(os.path.join(bills_dir, f"{safe}.xlsx"), "wb") as f:
-                f.write(data)
+        with open(os.path.join(d, "data.pkl"), "wb") as f:
+            pickle.dump({
+                "cleaned":       result["_cleaned"],
+                "source_view":   result["_source_view"],
+                "excluded_view": result["_excluded_view"],
+                "date_range":    result["date_range"],
+            }, f)
 
         meta = {
             "date_range": result["date_range"],
-            # "companies" = the ones that actually have data (used for download links)
-            "companies": list(result["companies"].keys()),
-            # companies that have a PD-format bills file (positive adjustments)
-            "bills_companies": list(result.get("bills_files", {}).keys()),
-            # "all_companies" = every QBO company from master (used to render the grid)
+            # every QBO company from the master list (drives the selection modal)
             "all_companies": result["all_companies"],
             "stats": result["stats"],
             "dropped": result.get("dropped", {}),
             "excluded": result.get("excluded", {"po_count": 0, "row_count": 0, "total_adjustment": 0.0}),
             "ignored_companies": result.get("ignored_companies", {}),
+            # populated by /configure once the user picks companies
+            "companies": [],
+            "bills_companies": [],
+            "selected_companies": [],
         }
         with open(os.path.join(d, "meta.json"), "w") as f:
             json.dump(meta, f)
 
         write_job_status(job_id, "done")
         log.info(
-            "Job %s done (%d companies with data, %d rows excluded)",
-            job_id, len(result["companies"]),
+            "Job %s processed (%d companies available, %d rows excluded)",
+            job_id, len(result["all_companies"]),
             result.get("excluded", {}).get("row_count", 0),
         )
     except Exception as e:
@@ -144,13 +138,77 @@ def status(job_id):
     return jsonify({
         "status": "done",
         "date_range": meta["date_range"],
-        "companies": meta["companies"],
-        "bills_companies": meta.get("bills_companies", []),
-        "all_companies": meta.get("all_companies", meta["companies"]),
+        "all_companies": meta.get("all_companies", []),
         "stats": meta.get("stats", {}),
         "dropped": meta.get("dropped", {}),
         "excluded": meta.get("excluded", {"po_count": 0, "row_count": 0, "total_adjustment": 0.0}),
         "ignored_companies": meta.get("ignored_companies", {}),
+    })
+
+
+@app.route("/configure/<job_id>", methods=["POST"])
+def configure(job_id):
+    """Build the output files for the user's selected companies, write them to
+    disk, and record which ones are available for download."""
+    meta = read_meta(job_id)
+    if not meta:
+        return jsonify({"error": "Job not found"}), 404
+
+    data = request.get_json(silent=True) or {}
+    selected = data.get("selected_companies", meta.get("all_companies", []))
+
+    pkl_path = os.path.join(job_dir(job_id), "data.pkl")
+    if not os.path.exists(pkl_path):
+        return jsonify({"error": "Job data not found"}), 404
+    with open(pkl_path, "rb") as f:
+        dfs = pickle.load(f)
+
+    try:
+        out = build_filtered_outputs(
+            dfs["cleaned"], dfs["source_view"], dfs["excluded_view"],
+            dfs["date_range"], selected,
+        )
+    except Exception as e:
+        log.exception("Configure %s failed", job_id)
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+    d = job_dir(job_id)
+    with open(os.path.join(d, "combined.xlsx"), "wb") as f:
+        f.write(out["combined"])
+
+    # (Re)write per-company expenses files, clearing any previous selection.
+    companies_dir = os.path.join(d, "companies")
+    os.makedirs(companies_dir, exist_ok=True)
+    for fn in os.listdir(companies_dir):
+        os.remove(os.path.join(companies_dir, fn))
+    for company, file_bytes in out["companies"].items():
+        safe = company.replace("/", "_").replace("\\", "_")
+        with open(os.path.join(companies_dir, f"{safe}.xlsx"), "wb") as f:
+            f.write(file_bytes)
+
+    # (Re)write per-company bills files.
+    bills_dir = os.path.join(d, "bills")
+    os.makedirs(bills_dir, exist_ok=True)
+    for fn in os.listdir(bills_dir):
+        os.remove(os.path.join(bills_dir, fn))
+    for company, file_bytes in out["bills_files"].items():
+        safe = company.replace("/", "_").replace("\\", "_")
+        with open(os.path.join(bills_dir, f"{safe}.xlsx"), "wb") as f:
+            f.write(file_bytes)
+
+    meta["selected_companies"] = selected
+    meta["companies"] = list(out["companies"].keys())
+    meta["bills_companies"] = list(out["bills_files"].keys())
+    with open(os.path.join(d, "meta.json"), "w") as f:
+        json.dump(meta, f)
+
+    return jsonify({
+        "status": "ready",
+        "date_range": meta["date_range"],
+        "selected_companies": selected,
+        "companies": meta["companies"],
+        "bills_companies": meta["bills_companies"],
+        "stats": meta.get("stats", {}),
     })
 
 

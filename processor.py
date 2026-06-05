@@ -1357,38 +1357,10 @@ def process_files(
             stats[name] = {"rows": 0, "total_cost": 0.0}
 
     # 7) Build Bills (one row per positive event) and Expenses (debit/credit
-    #    pairs per negative event), with a single global Expense # counter.
-    bills_df, expenses_df = _build_bills_and_expenses(cleaned)
-
-    # 7b) PD-format bills (all companies) — used both for the combined Bills tab
-    #     and split into the per-company bills files below.
-    pd_bills = build_pd_bills(cleaned)
-
-    # 8) Serialize everything to xlsx bytes. The combined Bills tab uses the
-    #    PD layout (same as the per-company bills files).
-    combined_bytes = _build_combined_workbook(
-        source_data_view, bills_df, expenses_df, all_companies, excluded_view,
-        pd_bills_df=pd_bills,
-    )
-    companies_with_expenses = (
-        set(expenses_df["_display_label"]) if "_display_label" in expenses_df.columns else set()
-    )
-    company_files = {
-        name: _build_company_workbook(name, expenses_df)
-        for name in company_dfs.keys()
-        if name in companies_with_expenses
-    }
-
-    # 8b) Per-company PD-format bills files (additional outputs). One file per
-    #     QBO company that has at least one positive adjustment, in the Purchase
-    #     Details column layout.
-    bills_files: dict[str, bytes] = {}
-    if not pd_bills.empty:
-        for label, grp in pd_bills.groupby("_display_label", sort=False):
-            grp_out = grp.drop(columns=["_display_label"])[PD_BILLS_COLUMNS].reset_index(drop=True)
-            bills_files[str(label)] = _write_single_sheet_xlsx(grp_out, "Bills")
-    # Order by display sort key for stable presentation.
-    bills_files = {k: bills_files[k] for k in sorted(bills_files.keys(), key=_sort_key)}
+    # Output files (combined workbook, per-company expenses files, per-company
+    # bills files) are built later by build_filtered_outputs(), once the user
+    # has chosen which companies to include. process_files only computes the
+    # data + stats needed to show the selection modal.
 
     # Excluded $ total — same Cancelled-override convention as the Combined
     # ledger, so Source total − Excluded total = Combined total.
@@ -1399,9 +1371,6 @@ def process_files(
 
     return {
         "date_range": date_range_str,
-        "combined": combined_bytes,
-        "companies": company_files,
-        "bills_files": bills_files,
         "all_companies": all_companies,
         "stats": stats,
         "dropped": dropped,
@@ -1411,4 +1380,73 @@ def process_files(
             "total_adjustment": round(excluded_total, 2),
         },
         "ignored_companies": out_of_scope_counts,
+        # Intermediates for deferred, company-filtered output building. The
+        # app pickles these and calls build_filtered_outputs() after the user
+        # picks companies in the selection modal.
+        "_cleaned": cleaned,
+        "_source_view": source_data_view,
+        "_excluded_view": excluded_view,
+    }
+
+
+def build_filtered_outputs(
+    cleaned: pd.DataFrame,
+    source_view: pd.DataFrame,
+    excluded_view: pd.DataFrame,
+    date_range: str,
+    selected_companies: list[str],
+) -> dict:
+    """Build the output files for the chosen companies only.
+
+    Returns a dict with:
+      - "combined"    : the combined workbook bytes (Source Data / Excluded are
+                        full; Combined / Summary / Bills / per-company tabs are
+                        limited to the selected companies)
+      - "companies"   : {label: xlsx bytes} per-company Expenses files (selected
+                        companies that have expense rows)
+      - "bills_files" : {label: xlsx bytes} per-company PD-format bills files
+                        (selected companies that have positive adjustments)
+
+    `selected_companies` are the short sheet/file labels (e.g. "GK", "Y&S").
+    """
+    selected = set(selected_companies)
+
+    if cleaned.empty:
+        cleaned_sel = cleaned
+    else:
+        cleaned_sel = cleaned[cleaned["Company"].map(file_label).isin(selected)].reset_index(drop=True)
+
+    bills_df, expenses_df = _build_bills_and_expenses(cleaned_sel)
+    pd_bills = build_pd_bills(cleaned_sel)
+
+    # Selected labels in display order (drives the combined per-company tabs).
+    selected_ordered = sorted(selected, key=_sort_key)
+
+    combined_bytes = _build_combined_workbook(
+        source_view, bills_df, expenses_df, selected_ordered, excluded_view,
+        pd_bills_df=pd_bills,
+    )
+
+    companies_with_expenses = (
+        set(expenses_df["_display_label"]) if "_display_label" in expenses_df.columns else set()
+    )
+    company_files = {
+        name: _build_company_workbook(name, expenses_df)
+        for name in selected_ordered
+        if name in companies_with_expenses
+    }
+
+    bills_files: dict[str, bytes] = {}
+    if not pd_bills.empty:
+        for label, grp in pd_bills.groupby("_display_label", sort=False):
+            if str(label) not in selected:
+                continue
+            grp_out = grp.drop(columns=["_display_label"])[PD_BILLS_COLUMNS].reset_index(drop=True)
+            bills_files[str(label)] = _write_single_sheet_xlsx(grp_out, "Bills")
+    bills_files = {k: bills_files[k] for k in sorted(bills_files.keys(), key=_sort_key)}
+
+    return {
+        "combined": combined_bytes,
+        "companies": company_files,
+        "bills_files": bills_files,
     }
