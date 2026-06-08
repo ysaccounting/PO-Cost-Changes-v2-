@@ -505,16 +505,46 @@ def test_company_files_are_expenses_only():
         res["_cleaned"], res["_source_view"], res["_excluded_view"],
         res["date_range"], res["all_companies"],
     )
-    # File/label is the short "GK"; the sheet is Expenses-only.
+    # File/label is the short "GK"; tab 1 Expenses, tabs 2/3 Source Data + Excluded.
     assert "GK" in out["companies"]
     import openpyxl, io as _io
     wb = openpyxl.load_workbook(_io.BytesIO(out["companies"]["GK"]))
-    assert wb.sheetnames == ["Expenses"]
-    ws = wb.active
+    assert wb.sheetnames == ["Expenses", "Source Data", "Excluded"]
+    ws = wb["Expenses"]
     h = [c.value for c in ws[1]]
     ci = h.index("Company")
     vals = {r[ci] for r in ws.iter_rows(min_row=2, values_only=True) if r[ci]}
     assert vals == {"YSKG"}   # Company-column value is the renamed value
+    # Source Data tab carries this company's input row(s).
+    sd = wb["Source Data"]
+    sh = [c.value for c in sd[1]]
+    sci = sh.index("Company")
+    src_vals = {r[sci] for r in sd.iter_rows(min_row=2, values_only=True) if r[sci]}
+    assert src_vals == {"GK LLC"}   # Source Data keeps the raw company name
+
+
+def test_company_files_have_company_scoped_tabs():
+    # Two companies, one with a same-day exclusion. Each company's file should
+    # only show its OWN rows on Source Data / Excluded.
+    rows = [
+        _row(PurchaseOrderID=1, CompanyName="GK LLC", PerformerName="A",
+             AccountEmail="a@b.com", InitialTicketCostTotal=100, TicketCostTotal=20),
+        _row(PurchaseOrderID=2, CompanyName="YSA", PerformerName="B",
+             AccountEmail="b@b.com", InitialTicketCostTotal=50, TicketCostTotal=10),
+    ]
+    res = processor.process_files([(_to_xlsx_bytes(rows), "f.xlsx")])
+    out = processor.build_filtered_outputs(
+        res["_cleaned"], res["_source_view"], res["_excluded_view"],
+        res["date_range"], res["all_companies"],
+    )
+    import openpyxl, io as _io
+    for label, raw_company in [("GK", "GK LLC"), ("YSA", "YSA")]:
+        wb = openpyxl.load_workbook(_io.BytesIO(out["companies"][label]))
+        assert wb.sheetnames == ["Expenses", "Source Data", "Excluded"]
+        sd = wb["Source Data"]
+        sci = [c.value for c in sd[1]].index("Company")
+        src_vals = {r[sci] for r in sd.iter_rows(min_row=2, values_only=True) if r[sci]}
+        assert src_vals == {raw_company}
 
 
 def test_offset_category_inverted_rule():

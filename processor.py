@@ -1078,14 +1078,17 @@ def _build_combined_workbook(
     # Summary first — pivot-style outline of the Combined ledger.
     _write_summary_sheet(wb, combined_ledger)
 
-    # Source data
-    _write_sheet(wb, "Source Data", source_df)
+    # Source data (full; drop the per-company label helper column)
+    _write_sheet(wb, "Source Data",
+                 source_df.drop(columns=[c for c in ["_label"] if c in source_df.columns]))
 
     # Excluded tab — right after Source Data so it's adjacent to the raw view.
     # Only added when at least one row got flagged Remove=X. Shape matches
     # Source Data so the user sees exactly which raw rows were removed.
     if excluded_df is not None and len(excluded_df) > 0:
-        _write_sheet(wb, "Excluded", excluded_df.reset_index(drop=True))
+        _write_sheet(wb, "Excluded",
+                     excluded_df.drop(columns=[c for c in ["_label"] if c in excluded_df.columns])
+                     .reset_index(drop=True))
 
     # Combined ledger
     _write_sheet(wb, "Combined", combined_ledger)
@@ -1120,25 +1123,63 @@ def _build_combined_workbook(
     return buf.getvalue()
 
 
-def _build_company_workbook(
+def _company_views(
+    source_view: pd.DataFrame | None,
+    excluded_view: pd.DataFrame | None,
     label: str,
-    expenses_df: pd.DataFrame,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Return (source_rows, excluded_rows) for one company, with the hidden
+    '_label' helper column removed. Empty (header-only) frames are returned
+    when there's nothing for that company."""
+    def _filt(df: pd.DataFrame | None) -> pd.DataFrame:
+        if df is None:
+            return pd.DataFrame()
+        keep = [c for c in df.columns if c != "_label"]
+        if "_label" not in df.columns:
+            return df[keep].reset_index(drop=True)
+        return df[df["_label"] == label][keep].reset_index(drop=True)
+    return _filt(source_view), _filt(excluded_view)
+
+
+def _build_company_file(
+    first_sheet_name: str,
+    first_df: pd.DataFrame,
+    label: str,
+    source_view: pd.DataFrame | None = None,
+    excluded_view: pd.DataFrame | None = None,
 ) -> bytes:
-    """Per-company download file: a single Expenses sheet. (Bills ship
-    separately as the per-company PD-format bills files.)"""
+    """Per-company download file. Tab 1 is the data sheet (Expenses or Bills);
+    tabs 2 and 3 are that company's own Source Data (its input rows) and
+    Excluded (its removed rows)."""
     wb = openpyxl.Workbook()
     wb.remove(wb.active)
 
-    if "_display_label" in expenses_df.columns:
-        e = expenses_df[expenses_df["_display_label"] == label].drop(columns=["_display_label"])
-    else:
-        e = expenses_df.iloc[0:0]
+    _write_sheet(wb, first_sheet_name, first_df.reset_index(drop=True))
 
-    _write_sheet(wb, "Expenses", e.reset_index(drop=True))
+    src_rows, exc_rows = _company_views(source_view, excluded_view, label)
+    _write_sheet(wb, "Source Data", src_rows)
+    _write_sheet(wb, "Excluded", exc_rows)
+    if len(exc_rows) == 0:
+        wb["Excluded"].sheet_properties.tabColor = "FF0000"
 
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()
+
+
+def _build_company_workbook(
+    label: str,
+    expenses_df: pd.DataFrame,
+    source_view: pd.DataFrame | None = None,
+    excluded_view: pd.DataFrame | None = None,
+) -> bytes:
+    """Per-company Expenses file: Expenses sheet + Source Data + Excluded tabs.
+    (Bills ship separately as the per-company PD-format bills files.)"""
+    if "_display_label" in expenses_df.columns:
+        e = expenses_df[expenses_df["_display_label"] == label].drop(columns=["_display_label"])
+    else:
+        e = expenses_df.iloc[0:0]
+    return _build_company_file("Expenses", e, label, source_view, excluded_view)
 
 
 def _write_single_sheet_xlsx(df: pd.DataFrame, sheet_name: str = "PO Cost Changes") -> bytes:
@@ -1309,6 +1350,27 @@ def process_files(
     source_data_view = _apply_cancelled_override_raw(merged)
     excluded_view = _apply_cancelled_override_raw(excluded_raw)
 
+    # 1d) Tag every raw row with its short per-company label (same label used
+    #     for the per-company tabs/files), so the per-company download files
+    #     can carry that company's own Source Data and Excluded tabs. Mirrors
+    #     transform()'s company chain: raw → QBO (master) → canonical casing →
+    #     display label → file_label. Hidden helper column, dropped before any
+    #     sheet is written.
+    _map = get_mapping()
+    _canonical_by_lower = {n.lower(): n for n in set(_map.values())}
+
+    def _row_label(raw) -> str:
+        if raw is None or (isinstance(raw, float) and pd.isna(raw)):
+            return ""
+        q = _map.get(str(raw).strip().lower(), raw)
+        q = _canonical_by_lower.get(str(q).strip().lower(), q)
+        return file_label(display_name(q))
+
+    source_data_view = source_data_view.copy()
+    excluded_view = excluded_view.copy()
+    source_data_view["_label"] = source_data_view["Company"].map(_row_label)
+    excluded_view["_label"] = excluded_view["Company"].map(_row_label)
+
     # 2) Run the canonical pipeline on the kept rows.
     cleaned, dropped = transform(merged_for_pipeline)
 
@@ -1431,7 +1493,7 @@ def build_filtered_outputs(
         set(expenses_df["_display_label"]) if "_display_label" in expenses_df.columns else set()
     )
     company_files = {
-        name: _build_company_workbook(name, expenses_df)
+        name: _build_company_workbook(name, expenses_df, source_view, excluded_view)
         for name in selected_ordered
         if name in companies_with_expenses
     }
@@ -1442,7 +1504,9 @@ def build_filtered_outputs(
             if str(label) not in selected:
                 continue
             grp_out = grp.drop(columns=["_display_label"])[PD_BILLS_COLUMNS].reset_index(drop=True)
-            bills_files[str(label)] = _write_single_sheet_xlsx(grp_out, "Bills")
+            bills_files[str(label)] = _build_company_file(
+                "Bills", grp_out, str(label), source_view, excluded_view
+            )
     bills_files = {k: bills_files[k] for k in sorted(bills_files.keys(), key=_sort_key)}
 
     return {
