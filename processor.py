@@ -652,9 +652,105 @@ def _normalize_new_export(df: pd.DataFrame, filename: str) -> pd.DataFrame:
 
 
 def _read_one(content: bytes, filename: str) -> pd.DataFrame:
-    """Read one uploaded file and normalize it to the internal schema."""
+    """Read one uploaded file and normalize it to the internal schema.
+
+    Two accepted shapes:
+      * a fresh TicketVault PO Cost Changes export (single 'Sheet'), or
+      * one of THIS app's own output workbooks — detected by a 'Source Data'
+        tab — re-uploaded after the user hand-edited that tab. In that case we
+        re-ingest the edited Source Data rows so the whole bundle regenerates
+        with their changes.
+    """
+    suffix = Path(filename).suffix.lower()
+    if suffix in (".xlsx", ".xlsm", ".xls"):
+        try:
+            xls = pd.ExcelFile(io.BytesIO(content))
+            sheets = set(xls.sheet_names)
+        except Exception:
+            sheets = set()
+        # An output workbook has a 'Source Data' tab and no raw-export 'Sheet'.
+        if "Source Data" in sheets and "Sheet" not in sheets:
+            sd = pd.read_excel(xls, sheet_name="Source Data", dtype={"ExtPONumber": str})
+            return _normalize_reupload(sd, filename)
+
     raw = _read_raw(content, filename)
     return _normalize_new_export(raw, filename)
+
+
+# Internal-schema columns that must be present to re-ingest an output file's
+# "Source Data" tab. Everything else is derived or optional.
+REUPLOAD_REQUIRED = {
+    "Company", "PO #", "Vendor", "Team/Performer",
+    "Ticket Cost Total Start", "Ticket Cost Total End",
+}
+
+
+def _normalize_reupload(df: pd.DataFrame, filename: str) -> pd.DataFrame:
+    """Re-ingest the 'Source Data' tab of one of this app's output workbooks.
+
+    The tab is already in the internal pipeline schema (raw Company, raw
+    Vendor, VenueName, the dates, etc.), so columns pass straight through and
+    only the derived bits are recomputed the way a fresh upload would:
+      * Total Adjustment = End − Start  (so manual cost edits take effect, and
+        transform() can re-apply the Cancelled override)
+      * the same-day exclusion flag, recomputed from Adjustment Date vs
+        CreatedDate at the date level
+
+    Adjustment Date is taken as-is from the sheet (an output file's name is a
+    date range, not a YYYY-MM-DD, so there's nothing to derive from it). A
+    'Remove' column is honored if the user added one to the tab.
+    """
+    df = df.rename(columns={c: str(c).strip() for c in df.columns})
+
+    missing = REUPLOAD_REQUIRED - set(df.columns)
+    if missing:
+        raise ValueError(
+            f"{filename!r} looks like a PO Cost Changes output file, but its "
+            f"'Source Data' tab is missing columns: {sorted(missing)}."
+        )
+
+    out = pd.DataFrame()
+    for col in ["Company", "PO #", "Vendor", "Team/Performer", "User"]:
+        if col in df.columns:
+            out[col] = df[col]
+
+    start = pd.to_numeric(df["Ticket Cost Total Start"], errors="coerce")
+    end = pd.to_numeric(df["Ticket Cost Total End"], errors="coerce")
+    out["Ticket Cost Total Start"] = start
+    out["Ticket Cost Total End"] = end
+    out["Total Adjustment"] = end.fillna(0) - start.fillna(0)
+
+    if "Cancelled" in df.columns:
+        out["Cancelled"] = df["Cancelled"].map(_to_cancelled).astype("string")
+    else:
+        out["Cancelled"] = pd.Series([""] * len(df), dtype="string")
+
+    # Keep the date already on the sheet (date-only, US Central).
+    out["Adjustment Date"] = pd.to_datetime(df.get("Adjustment Date"), errors="coerce")
+
+    out["AccountEmail"] = df["AccountEmail"].map(_clean_key_str) if "AccountEmail" in df.columns else ""
+    out["ExtPONumber"] = df["ExtPONumber"].map(_clean_key_str) if "ExtPONumber" in df.columns else ""
+
+    if "CreatedDate" in df.columns:
+        out["CreatedDate"] = pd.to_datetime(df["CreatedDate"], errors="coerce").dt.normalize()
+    else:
+        out["CreatedDate"] = pd.NaT
+
+    # Same-day exclusion — both dates already US Central; blank never matches.
+    adj = pd.to_datetime(out["Adjustment Date"], errors="coerce").dt.normalize()
+    cre = out["CreatedDate"]
+    same_day = adj.eq(cre) & adj.notna() & cre.notna()
+    out[EXCLUDE_SAME_DATE_COL] = same_day.fillna(False).to_numpy()
+
+    remove_col = next((c for c in df.columns if str(c).strip().lower() == "remove"), None)
+    if remove_col is not None:
+        out["Remove"] = df[remove_col]
+
+    for col in PASSTHROUGH_COLUMNS:
+        if col in df.columns:
+            out[col] = df[col]
+
+    return out
 
 
 def _write_sheet(wb, sheet_name: str, df: pd.DataFrame) -> None:
@@ -1038,24 +1134,6 @@ def _write_summary_sheet(wb, combined_ledger: pd.DataFrame) -> None:
     ws.freeze_panes = "A3"
 
 
-def _combined_ledger(bills_df: pd.DataFrame, expenses_df: pd.DataFrame) -> pd.DataFrame:
-    """The 'Combined' ledger: one row per aggregated event — bills as-is plus
-    the negative (Inventory Asset) leg of each expense pair — ordered by
-    Expense #. Used for the Combined tab and the Summary pivot."""
-    drop_helper = lambda d: d.drop(columns=[c for c in ["_display_label"] if c in d.columns])
-    bills_visible = drop_helper(bills_df)
-    expenses_visible = drop_helper(expenses_df)
-    if not expenses_visible.empty:
-        expense_singles = expenses_visible[expenses_visible["Category"] == "Inventory Asset"]
-    else:
-        expense_singles = expenses_visible
-    return (
-        pd.concat([bills_visible, expense_singles], ignore_index=True)
-        .sort_values("Expense #", kind="mergesort")
-        .reset_index(drop=True)
-    )
-
-
 def _build_combined_workbook(
     source_df: pd.DataFrame,
     bills_df: pd.DataFrame,
@@ -1080,7 +1158,15 @@ def _build_combined_workbook(
     # 'Combined' = every aggregated event as a single ledger row:
     #   bills as-is + the negative (Inventory Asset) leg of expenses,
     #   ordered by Expense #.
-    combined_ledger = _combined_ledger(bills_df, expenses_df)
+    if not expenses_visible.empty:
+        expense_singles = expenses_visible[
+            expenses_visible["Category"] == "Inventory Asset"
+        ]
+    else:
+        expense_singles = expenses_visible
+    combined_ledger = pd.concat(
+        [bills_visible, expense_singles], ignore_index=True
+    ).sort_values("Expense #", kind="mergesort").reset_index(drop=True)
 
     wb = openpyxl.Workbook()
     wb.remove(wb.active)
@@ -1157,22 +1243,14 @@ def _build_company_file(
     label: str,
     source_view: pd.DataFrame | None = None,
     excluded_view: pd.DataFrame | None = None,
-    summary_ledger: pd.DataFrame | None = None,
 ) -> bytes:
     """Per-company download file. Tab 1 is the data sheet (Expenses or Bills);
-    tab 2 is that company's Summary pivot (same layout as the combined file);
-    tabs 3 and 4 are its own Source Data (input rows) and Excluded (removed
-    rows)."""
+    tabs 2 and 3 are that company's own Source Data (its input rows) and
+    Excluded (its removed rows)."""
     wb = openpyxl.Workbook()
     wb.remove(wb.active)
 
     _write_sheet(wb, first_sheet_name, first_df.reset_index(drop=True))
-
-    # Summary pivot for just this company (Company > Vendor > Description).
-    _write_summary_sheet(
-        wb,
-        summary_ledger if summary_ledger is not None else pd.DataFrame(),
-    )
 
     src_rows, exc_rows = _company_views(source_view, excluded_view, label)
     _write_sheet(wb, "Source Data", src_rows)
@@ -1190,16 +1268,14 @@ def _build_company_workbook(
     expenses_df: pd.DataFrame,
     source_view: pd.DataFrame | None = None,
     excluded_view: pd.DataFrame | None = None,
-    summary_ledger: pd.DataFrame | None = None,
 ) -> bytes:
-    """Per-company Expenses file: Expenses sheet + Summary + Source Data +
-    Excluded tabs. (Bills ship separately as the per-company PD-format bills
-    files.)"""
+    """Per-company Expenses file: Expenses sheet + Source Data + Excluded tabs.
+    (Bills ship separately as the per-company PD-format bills files.)"""
     if "_display_label" in expenses_df.columns:
         e = expenses_df[expenses_df["_display_label"] == label].drop(columns=["_display_label"])
     else:
         e = expenses_df.iloc[0:0]
-    return _build_company_file("Expenses", e, label, source_view, excluded_view, summary_ledger)
+    return _build_company_file("Expenses", e, label, source_view, excluded_view)
 
 
 def _write_single_sheet_xlsx(df: pd.DataFrame, sheet_name: str = "PO Cost Changes") -> bytes:
@@ -1509,29 +1585,11 @@ def build_filtered_outputs(
         pd_bills_df=pd_bills,
     )
 
-    # Per-company Combined ledger slices drive each file's Summary pivot. Slice
-    # bills_df / expenses_df by their "_display_label" (the same label used for
-    # the per-company files) BEFORE building the ledger — the ledger's own
-    # Company column holds the renamed value, not the short label, so it can't
-    # be used to split reliably.
-    def _company_ledger(name: str) -> pd.DataFrame:
-        if "_display_label" in bills_df.columns:
-            b = bills_df[bills_df["_display_label"] == name]
-        else:
-            b = bills_df.iloc[0:0]
-        if "_display_label" in expenses_df.columns:
-            e = expenses_df[expenses_df["_display_label"] == name]
-        else:
-            e = expenses_df.iloc[0:0]
-        return _combined_ledger(b, e)
-
     companies_with_expenses = (
         set(expenses_df["_display_label"]) if "_display_label" in expenses_df.columns else set()
     )
     company_files = {
-        name: _build_company_workbook(
-            name, expenses_df, source_view, excluded_view, _company_ledger(name)
-        )
+        name: _build_company_workbook(name, expenses_df, source_view, excluded_view)
         for name in selected_ordered
         if name in companies_with_expenses
     }
@@ -1543,8 +1601,7 @@ def build_filtered_outputs(
                 continue
             grp_out = grp.drop(columns=["_display_label"])[PD_BILLS_COLUMNS].reset_index(drop=True)
             bills_files[str(label)] = _build_company_file(
-                "Bills", grp_out, str(label), source_view, excluded_view,
-                _company_ledger(str(label)),
+                "Bills", grp_out, str(label), source_view, excluded_view
             )
     bills_files = {k: bills_files[k] for k in sorted(bills_files.keys(), key=_sort_key)}
 

@@ -80,6 +80,17 @@ In the combined workbook, **Source Data and Excluded are always the full
 upload**; the Combined, Summary, Bills, and per-company tabs reflect only the
 selected companies.
 
+### Re-uploading an output file (edit-and-regenerate)
+
+Any generated output workbook can be **re-uploaded** after the user hand-edits
+its `Source Data` tab — fix a vendor or cost, add a `Remove` column with `X`
+to drop already-entered rows, delete rows, etc. `_read_one()` detects an output
+file by its `Source Data` tab (vs. the raw export's single `Sheet`) and routes
+it through `_normalize_reupload()`, which re-ingests those rows in the internal
+schema: it keeps the existing Adjustment Date, recomputes `Total Adjustment =
+End − Start` and the same-day exclusion flag, and honors a hand-added `Remove`
+column. Re-uploading an unedited output reproduces the original run exactly.
+
 ## New-export columns used
 
 The reader maps these and drops the rest (seat-level detail, IDs, venue, etc.):
@@ -165,14 +176,12 @@ labels are defined in `FILE_LABELS`, the Company-value renames in
 `COMPANY_VALUE_RENAMES`, and the QBO→Company-value map in `DISPLAY_NAMES`.
 
 The downloadable **individual company files lead with their data sheet
-(Expenses or Bills), then carry a `Summary` pivot (same Company › Vendor ›
-Description layout as the combined file, scoped to that company), then
-`Source Data` and `Excluded` tabs** — also scoped to that company. So each file
-is self-contained: the company's pivot, its own input rows, and exactly which
-of them were removed. (The Excluded tab is colored red when that company had
-nothing excluded.) Expenses and bills ship as separate files; a company with no
-negative adjustments gets no expenses file, and one with no positive
-adjustments gets no bills file.
+(Expenses or Bills) and then carry two more tabs — `Source Data` and
+`Excluded` — scoped to that company**, so each file is self-contained: the
+company's own input rows and exactly which of them were removed. (The Excluded
+tab is colored red when that company had nothing excluded.) Expenses and bills
+ship as separate files; a company with no negative adjustments gets no expenses
+file, and one with no positive adjustments gets no bills file.
 
 ## Per-company "Bills" files (QBO import format)
 

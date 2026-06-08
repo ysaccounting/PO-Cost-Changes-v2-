@@ -509,7 +509,7 @@ def test_company_files_are_expenses_only():
     assert "GK" in out["companies"]
     import openpyxl, io as _io
     wb = openpyxl.load_workbook(_io.BytesIO(out["companies"]["GK"]))
-    assert wb.sheetnames == ["Expenses", "Summary", "Source Data", "Excluded"]
+    assert wb.sheetnames == ["Expenses", "Source Data", "Excluded"]
     ws = wb["Expenses"]
     h = [c.value for c in ws[1]]
     ci = h.index("Company")
@@ -540,7 +540,7 @@ def test_company_files_have_company_scoped_tabs():
     import openpyxl, io as _io
     for label, raw_company in [("GK", "GK LLC"), ("YSA", "YSA")]:
         wb = openpyxl.load_workbook(_io.BytesIO(out["companies"][label]))
-        assert wb.sheetnames == ["Expenses", "Summary", "Source Data", "Excluded"]
+        assert wb.sheetnames == ["Expenses", "Source Data", "Excluded"]
         sd = wb["Source Data"]
         sci = [c.value for c in sd[1]].index("Company")
         src_vals = {r[sci] for r in sd.iter_rows(min_row=2, values_only=True) if r[sci]}
@@ -676,3 +676,65 @@ def test_real_samples_reconcile():
     )
     assert out["combined"]
     assert res["stats"]["Combined"]["rows"] > 0
+
+
+# ---------------------------------------------------------------------------
+# Re-uploading an app output file (edited Source Data tab)
+# ---------------------------------------------------------------------------
+
+def _combined_bytes(rows):
+    res = processor.process_files([(_to_xlsx_bytes(rows), "f.xlsx")])
+    out = processor.build_filtered_outputs(
+        res["_cleaned"], res["_source_view"], res["_excluded_view"],
+        res["date_range"], res["all_companies"],
+    )
+    return res, out["combined"]
+
+
+def test_reupload_output_file_round_trips():
+    # Process a fresh export, then feed its own Combined workbook back in. The
+    # regenerated run should match the original exactly.
+    rows = [
+        _row(PurchaseOrderID=1, CompanyName="GK LLC", PerformerName="A",
+             AccountEmail="a@b.com", InitialTicketCostTotal=100, TicketCostTotal=20),
+        _row(PurchaseOrderID=2, CompanyName="YSA", PerformerName="B",
+             AccountEmail="b@b.com", InitialTicketCostTotal=0, TicketCostTotal=80),
+    ]
+    res1, combined = _combined_bytes(rows)
+    res2 = processor.process_files([(combined, "PO Cost Changes - Combined - June 2nd 2026.xlsx")])
+    assert res2["date_range"] == res1["date_range"]
+    assert res2["stats"]["Combined"] == res1["stats"]["Combined"]
+    assert res2["excluded"]["row_count"] == res1["excluded"]["row_count"]
+
+
+def test_reupload_detected_as_source_data():
+    rows = [_row(PurchaseOrderID=1, CompanyName="GK LLC", PerformerName="A",
+                 AccountEmail="a@b.com", InitialTicketCostTotal=100, TicketCostTotal=20)]
+    _, combined = _combined_bytes(rows)
+    # _read_one should route the output workbook through the re-upload path.
+    df = processor._read_one(combined, "whatever - Combined - June.xlsx")
+    assert {"Company", "PO #", "Vendor", "Ticket Cost Total Start"} <= set(df.columns)
+
+
+def test_reupload_honors_hand_added_remove_flag():
+    import openpyxl, io as _io
+    rows = [
+        _row(PurchaseOrderID=1, CompanyName="GK LLC", PerformerName="A",
+             AccountEmail="a@b.com", InitialTicketCostTotal=100, TicketCostTotal=20),
+        _row(PurchaseOrderID=2, CompanyName="GK LLC", PerformerName="B",
+             AccountEmail="b@b.com", InitialTicketCostTotal=50, TicketCostTotal=10),
+    ]
+    res1, combined = _combined_bytes(rows)
+    assert res1["excluded"]["row_count"] == 0
+
+    # User opens the workbook, adds a "Remove" column on Source Data, marks the
+    # first data row with an X, and re-uploads.
+    wb = openpyxl.load_workbook(_io.BytesIO(combined))
+    ws = wb["Source Data"]
+    col = ws.max_column + 1
+    ws.cell(row=1, column=col, value="Remove")
+    ws.cell(row=2, column=col, value="X")
+    buf = _io.BytesIO(); wb.save(buf)
+
+    res2 = processor.process_files([(buf.getvalue(), "edited - Combined - June.xlsx")])
+    assert res2["excluded"]["row_count"] == 1
