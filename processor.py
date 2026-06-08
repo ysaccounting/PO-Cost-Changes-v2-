@@ -1038,6 +1038,24 @@ def _write_summary_sheet(wb, combined_ledger: pd.DataFrame) -> None:
     ws.freeze_panes = "A3"
 
 
+def _combined_ledger(bills_df: pd.DataFrame, expenses_df: pd.DataFrame) -> pd.DataFrame:
+    """The 'Combined' ledger: one row per aggregated event — bills as-is plus
+    the negative (Inventory Asset) leg of each expense pair — ordered by
+    Expense #. Used for the Combined tab and the Summary pivot."""
+    drop_helper = lambda d: d.drop(columns=[c for c in ["_display_label"] if c in d.columns])
+    bills_visible = drop_helper(bills_df)
+    expenses_visible = drop_helper(expenses_df)
+    if not expenses_visible.empty:
+        expense_singles = expenses_visible[expenses_visible["Category"] == "Inventory Asset"]
+    else:
+        expense_singles = expenses_visible
+    return (
+        pd.concat([bills_visible, expense_singles], ignore_index=True)
+        .sort_values("Expense #", kind="mergesort")
+        .reset_index(drop=True)
+    )
+
+
 def _build_combined_workbook(
     source_df: pd.DataFrame,
     bills_df: pd.DataFrame,
@@ -1062,15 +1080,7 @@ def _build_combined_workbook(
     # 'Combined' = every aggregated event as a single ledger row:
     #   bills as-is + the negative (Inventory Asset) leg of expenses,
     #   ordered by Expense #.
-    if not expenses_visible.empty:
-        expense_singles = expenses_visible[
-            expenses_visible["Category"] == "Inventory Asset"
-        ]
-    else:
-        expense_singles = expenses_visible
-    combined_ledger = pd.concat(
-        [bills_visible, expense_singles], ignore_index=True
-    ).sort_values("Expense #", kind="mergesort").reset_index(drop=True)
+    combined_ledger = _combined_ledger(bills_df, expenses_df)
 
     wb = openpyxl.Workbook()
     wb.remove(wb.active)
@@ -1147,14 +1157,22 @@ def _build_company_file(
     label: str,
     source_view: pd.DataFrame | None = None,
     excluded_view: pd.DataFrame | None = None,
+    summary_ledger: pd.DataFrame | None = None,
 ) -> bytes:
     """Per-company download file. Tab 1 is the data sheet (Expenses or Bills);
-    tabs 2 and 3 are that company's own Source Data (its input rows) and
-    Excluded (its removed rows)."""
+    tab 2 is that company's Summary pivot (same layout as the combined file);
+    tabs 3 and 4 are its own Source Data (input rows) and Excluded (removed
+    rows)."""
     wb = openpyxl.Workbook()
     wb.remove(wb.active)
 
     _write_sheet(wb, first_sheet_name, first_df.reset_index(drop=True))
+
+    # Summary pivot for just this company (Company > Vendor > Description).
+    _write_summary_sheet(
+        wb,
+        summary_ledger if summary_ledger is not None else pd.DataFrame(),
+    )
 
     src_rows, exc_rows = _company_views(source_view, excluded_view, label)
     _write_sheet(wb, "Source Data", src_rows)
@@ -1172,14 +1190,16 @@ def _build_company_workbook(
     expenses_df: pd.DataFrame,
     source_view: pd.DataFrame | None = None,
     excluded_view: pd.DataFrame | None = None,
+    summary_ledger: pd.DataFrame | None = None,
 ) -> bytes:
-    """Per-company Expenses file: Expenses sheet + Source Data + Excluded tabs.
-    (Bills ship separately as the per-company PD-format bills files.)"""
+    """Per-company Expenses file: Expenses sheet + Summary + Source Data +
+    Excluded tabs. (Bills ship separately as the per-company PD-format bills
+    files.)"""
     if "_display_label" in expenses_df.columns:
         e = expenses_df[expenses_df["_display_label"] == label].drop(columns=["_display_label"])
     else:
         e = expenses_df.iloc[0:0]
-    return _build_company_file("Expenses", e, label, source_view, excluded_view)
+    return _build_company_file("Expenses", e, label, source_view, excluded_view, summary_ledger)
 
 
 def _write_single_sheet_xlsx(df: pd.DataFrame, sheet_name: str = "PO Cost Changes") -> bytes:
@@ -1489,11 +1509,29 @@ def build_filtered_outputs(
         pd_bills_df=pd_bills,
     )
 
+    # Per-company Combined ledger slices drive each file's Summary pivot. Slice
+    # bills_df / expenses_df by their "_display_label" (the same label used for
+    # the per-company files) BEFORE building the ledger — the ledger's own
+    # Company column holds the renamed value, not the short label, so it can't
+    # be used to split reliably.
+    def _company_ledger(name: str) -> pd.DataFrame:
+        if "_display_label" in bills_df.columns:
+            b = bills_df[bills_df["_display_label"] == name]
+        else:
+            b = bills_df.iloc[0:0]
+        if "_display_label" in expenses_df.columns:
+            e = expenses_df[expenses_df["_display_label"] == name]
+        else:
+            e = expenses_df.iloc[0:0]
+        return _combined_ledger(b, e)
+
     companies_with_expenses = (
         set(expenses_df["_display_label"]) if "_display_label" in expenses_df.columns else set()
     )
     company_files = {
-        name: _build_company_workbook(name, expenses_df, source_view, excluded_view)
+        name: _build_company_workbook(
+            name, expenses_df, source_view, excluded_view, _company_ledger(name)
+        )
         for name in selected_ordered
         if name in companies_with_expenses
     }
@@ -1505,7 +1543,8 @@ def build_filtered_outputs(
                 continue
             grp_out = grp.drop(columns=["_display_label"])[PD_BILLS_COLUMNS].reset_index(drop=True)
             bills_files[str(label)] = _build_company_file(
-                "Bills", grp_out, str(label), source_view, excluded_view
+                "Bills", grp_out, str(label), source_view, excluded_view,
+                _company_ledger(str(label)),
             )
     bills_files = {k: bills_files[k] for k in sorted(bills_files.keys(), key=_sort_key)}
 

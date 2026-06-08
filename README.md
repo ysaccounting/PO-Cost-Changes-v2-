@@ -165,12 +165,14 @@ labels are defined in `FILE_LABELS`, the Company-value renames in
 `COMPANY_VALUE_RENAMES`, and the QBO→Company-value map in `DISPLAY_NAMES`.
 
 The downloadable **individual company files lead with their data sheet
-(Expenses or Bills) and then carry two more tabs — `Source Data` and
-`Excluded` — scoped to that company**, so each file is self-contained: the
-company's own input rows and exactly which of them were removed. (The Excluded
-tab is colored red when that company had nothing excluded.) Expenses and bills
-ship as separate files; a company with no negative adjustments gets no expenses
-file, and one with no positive adjustments gets no bills file.
+(Expenses or Bills), then carry a `Summary` pivot (same Company › Vendor ›
+Description layout as the combined file, scoped to that company), then
+`Source Data` and `Excluded` tabs** — also scoped to that company. So each file
+is self-contained: the company's pivot, its own input rows, and exactly which
+of them were removed. (The Excluded tab is colored red when that company had
+nothing excluded.) Expenses and bills ship as separate files; a company with no
+negative adjustments gets no expenses file, and one with no positive
+adjustments gets no bills file.
 
 ## Per-company "Bills" files (QBO import format)
 

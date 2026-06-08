@@ -509,7 +509,7 @@ def test_company_files_are_expenses_only():
     assert "GK" in out["companies"]
     import openpyxl, io as _io
     wb = openpyxl.load_workbook(_io.BytesIO(out["companies"]["GK"]))
-    assert wb.sheetnames == ["Expenses", "Source Data", "Excluded"]
+    assert wb.sheetnames == ["Expenses", "Summary", "Source Data", "Excluded"]
     ws = wb["Expenses"]
     h = [c.value for c in ws[1]]
     ci = h.index("Company")
@@ -540,7 +540,7 @@ def test_company_files_have_company_scoped_tabs():
     import openpyxl, io as _io
     for label, raw_company in [("GK", "GK LLC"), ("YSA", "YSA")]:
         wb = openpyxl.load_workbook(_io.BytesIO(out["companies"][label]))
-        assert wb.sheetnames == ["Expenses", "Source Data", "Excluded"]
+        assert wb.sheetnames == ["Expenses", "Summary", "Source Data", "Excluded"]
         sd = wb["Source Data"]
         sci = [c.value for c in sd[1]].index("Company")
         src_vals = {r[sci] for r in sd.iter_rows(min_row=2, values_only=True) if r[sci]}
