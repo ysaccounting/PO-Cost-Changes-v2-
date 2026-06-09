@@ -509,7 +509,7 @@ def test_company_files_are_expenses_only():
     assert "GK" in out["companies"]
     import openpyxl, io as _io
     wb = openpyxl.load_workbook(_io.BytesIO(out["companies"]["GK"]))
-    assert wb.sheetnames == ["Expenses", "Source Data", "Excluded"]
+    assert wb.sheetnames == ["Expenses", "Summary", "Source Data", "Excluded"]
     ws = wb["Expenses"]
     h = [c.value for c in ws[1]]
     ci = h.index("Company")
@@ -540,7 +540,7 @@ def test_company_files_have_company_scoped_tabs():
     import openpyxl, io as _io
     for label, raw_company in [("GK", "GK LLC"), ("YSA", "YSA")]:
         wb = openpyxl.load_workbook(_io.BytesIO(out["companies"][label]))
-        assert wb.sheetnames == ["Expenses", "Source Data", "Excluded"]
+        assert wb.sheetnames == ["Expenses", "Summary", "Source Data", "Excluded"]
         sd = wb["Source Data"]
         sci = [c.value for c in sd[1]].index("Company")
         src_vals = {r[sci] for r in sd.iter_rows(min_row=2, values_only=True) if r[sci]}
@@ -679,6 +679,46 @@ def test_real_samples_reconcile():
 
 
 # ---------------------------------------------------------------------------
+# Live Nation (concert-season) collapse
+# ---------------------------------------------------------------------------
+
+def test_live_nation_collapses_to_various():
+    # Concert-season rows that become a "Live Nation …" vendor collapse to a
+    # single "Various / Various" line per company/date/vendor, dropping the
+    # per-event performer / email / order detail.
+    rows = [
+        _row(PurchaseOrderID=1, CompanyName="YSA", Vendor="Concert Seasons",
+             VenueName="Jiffy Lube Live", PerformerName="Band A",
+             AccountEmail="a@x.com", ExtPONumber="ORD111",
+             InitialTicketCostTotal=0, TicketCostTotal=100),
+        _row(PurchaseOrderID=2, CompanyName="YSA", Vendor="Concert Seasons",
+             VenueName="Jiffy Lube Live", PerformerName="Band B",
+             AccountEmail="b@x.com", ExtPONumber="ORD222",
+             InitialTicketCostTotal=0, TicketCostTotal=150),
+    ]
+    res = processor.process_files([(_to_xlsx_bytes(rows), "PO_Cost_Changes_2026-06-02.xlsx")])
+    cl = res["_cleaned"]
+    ln = cl[cl["Vendor"].str.contains("Live Nation")]
+    assert len(ln) == 1                                    # the two rows merged
+    r = ln.iloc[0]
+    assert r["Team/Performer"] == "Various / Various"
+    assert r["AccountEmail"] == "" and r["ExtPONumber"] == ""
+    assert r["Total Adjustment"] == 250                    # 100 + 150 summed
+
+
+def test_non_live_nation_keeps_detail():
+    rows = [
+        _row(PurchaseOrderID=1, CompanyName="YSA", Vendor="SeatGeek",
+             PerformerName="Knicks", AccountEmail="c@x.com", ExtPONumber="ORD333",
+             InitialTicketCostTotal=0, TicketCostTotal=50),
+    ]
+    res = processor.process_files([(_to_xlsx_bytes(rows), "f.xlsx")])
+    r = res["_cleaned"].iloc[0]
+    assert r["Team/Performer"] == "Knicks"
+    assert r["AccountEmail"] == "c@x.com"
+
+
+# ---------------------------------------------------------------------------
 # Re-uploading an app output file (edited Source Data tab)
 # ---------------------------------------------------------------------------
 
@@ -692,8 +732,6 @@ def _combined_bytes(rows):
 
 
 def test_reupload_output_file_round_trips():
-    # Process a fresh export, then feed its own Combined workbook back in. The
-    # regenerated run should match the original exactly.
     rows = [
         _row(PurchaseOrderID=1, CompanyName="GK LLC", PerformerName="A",
              AccountEmail="a@b.com", InitialTicketCostTotal=100, TicketCostTotal=20),
@@ -711,7 +749,6 @@ def test_reupload_detected_as_source_data():
     rows = [_row(PurchaseOrderID=1, CompanyName="GK LLC", PerformerName="A",
                  AccountEmail="a@b.com", InitialTicketCostTotal=100, TicketCostTotal=20)]
     _, combined = _combined_bytes(rows)
-    # _read_one should route the output workbook through the re-upload path.
     df = processor._read_one(combined, "whatever - Combined - June.xlsx")
     assert {"Company", "PO #", "Vendor", "Ticket Cost Total Start"} <= set(df.columns)
 
@@ -727,8 +764,6 @@ def test_reupload_honors_hand_added_remove_flag():
     res1, combined = _combined_bytes(rows)
     assert res1["excluded"]["row_count"] == 0
 
-    # User opens the workbook, adds a "Remove" column on Source Data, marks the
-    # first data row with an X, and re-uploads.
     wb = openpyxl.load_workbook(_io.BytesIO(combined))
     ws = wb["Source Data"]
     col = ws.max_column + 1
