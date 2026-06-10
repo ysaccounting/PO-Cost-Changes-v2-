@@ -62,24 +62,19 @@ gunicorn app:app --workers 1 --worker-class gthread --threads 4 --timeout 120
 
 ## How it works
 
-The UI has two zones. **Zone 1 (optional)** converts a raw export into a clean,
-editable file; **Zone 2 (required)** does the actual processing.
-
 **Zone 1 — reformat (optional).** `POST /convert` (one file) or `POST /convert_zip`
 (several) runs `convert_to_modified()`, which reads a raw PO Cost Changes export
-and returns a single-sheet **Modified** workbook: the same seat-level rows with
-columns renamed/reordered into a friendly review layout (the cost/qty fields
-split into Start = initial and End = current; five internal ID/match columns
-dropped). Values are preserved exactly — no aggregation, no date conversion. The
-user can review/edit it and feed it into Zone 2, which reads the Modified layout
-natively. Running a file through Zone 1 then Zone 2 is identical to uploading the
-raw file straight into Zone 2.
+and returns a single-sheet **Converted** workbook: the same seat-level rows with
+columns renamed/reordered into a friendly review layout (cost/qty fields split
+into Start = initial and End = current; five internal ID/match columns dropped).
+Values are preserved exactly — no aggregation, no date conversion. The user can
+review/edit it and feed it into Zone 2, which reads the Converted layout
+natively. Zone 1 → Zone 2 is identical to uploading the raw file into Zone 2.
 
 **Zone 2 — process (required).**
 
-1. User drops one or more files — a raw new-export **or** a Modified file from
-   Zone 1 (a generated output workbook with a `Source Data` tab is also accepted
-   and re-processed).
+1. User drops one or more files — a raw new-export **or** a Converted file from
+   Zone 1.
 2. `POST /upload` saves them and kicks off a background thread running
    `process_files()`, which computes the data + per-company stats and pickles
    the intermediate DataFrames (it does **not** build the output files yet).
@@ -267,8 +262,8 @@ ones on Ticketmaster AM) are kept.
 | Method | Path | Returns |
 |--------|------|---------|
 | GET | `/` | HTML drag-and-drop UI |
-| POST | `/convert` | Zone 1: one raw export → single-sheet **Modified** `.xlsx` |
-| POST | `/convert_zip` | Zone 1: several raw exports → zip of Modified files |
+| POST | `/convert` | Zone 1: one raw export → single-sheet **Converted** `.xlsx` |
+| POST | `/convert_zip` | Zone 1: several raw exports → zip of Converted files |
 | POST | `/upload` | `{job_id}` — kicks off background processing |
 | GET | `/status/<job_id>` | `{status, date_range, all_companies, stats, excluded, ignored_companies, ...}` |
 | POST | `/configure/<job_id>` | `{selected_companies}` → builds the chosen companies' files; returns `{status, companies, bills_companies, ...}` |

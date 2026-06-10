@@ -1751,7 +1751,7 @@ def convert_to_modified(file_bytes: bytes, filename: str) -> bytes:
 
     wb = openpyxl.Workbook()
     ws = wb.active
-    ws.title = "Modified"
+    ws.title = "Converted"
     _write_modified_sheet(ws, out)
 
     buf = io.BytesIO()

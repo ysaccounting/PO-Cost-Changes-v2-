@@ -407,9 +407,10 @@
   <h1>PO Cost Changes</h1>
   <p class="subtitle">Upload one or more TicketVault PO Cost Changes files (from the nightly data puller on Slack) to generate output files ready for QBO.</p>
 
+  <div id="zone1-section">
   <p class="zone-label">Zone 1 (Optional) — Upload the Slack data puller version to receive back the traditional TicketVault PO Cost Changes screen version.</p>
   <div id="convert-drop-zone">
-    <p>Drag & drop your Excel or CSV files here, or <span class="browse-link" id="convert-browse-link">browse</span></p>
+    <p>Drag &amp; drop your Excel or CSV files here, or <span class="browse-link" id="convert-browse-link">browse</span></p>
     <p class="file-hint">Accepts multiple files — downloads as zip if more than one</p>
   </div>
   <input type="file" id="convert-file-input" accept=".xlsx,.xlsm,.xls,.csv" style="display:none;" multiple />
@@ -423,7 +424,7 @@
     <p class="status-text" id="convert-status-text">Converting…</p>
   </div>
   <div id="convert-result">
-    <a id="convert-download-btn" href="#" download>⬇ <span id="convert-download-label">Download modified file</span></a>
+    <a id="convert-download-btn" href="#" download>⬇ <span id="convert-download-label">Download File</span></a>
     <div class="convert-secondary">
       <button id="convert-again">Convert another</button>
       <button id="convert-clear-btn">Clear</button>
@@ -431,6 +432,7 @@
   </div>
 
   <div class="zone-divider"></div>
+  </div>
   <p class="zone-label">Zone 2 (Required) — Upload either the Slack data puller version or the traditional version received back from Zone 1 above.</p>
 
   <div id="drop-zone" class="drop-zone">
@@ -438,7 +440,7 @@
       <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"
         d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5"/>
     </svg>
-    <p>Drag & drop your Excel or CSV files here, or <span class="browse-link" id="browse-link">browse</span></p>
+    <p>Drag &amp; drop your Excel or CSV files here, or <span class="browse-link" id="browse-link">browse</span></p>
     <p class="file-hint">Accepts multiple files and merges</p>
     <input type="file" id="file-input" accept=".xlsx,.xlsm,.xls,.csv" multiple />
   </div>
@@ -527,7 +529,7 @@
   </div>
 
   <button id="reset-btn" style="display:none;">Process another file</button>
-  <button id="clear-btn">✕ Clear All &amp; Start Over</button>
+  <button id="clear-btn">✕ Clear</button>
 </div>
 
 <div id="modal-overlay">
@@ -569,7 +571,7 @@
   let _jobId = null;  // job awaiting company selection
   let _data = null;   // status payload for that job
 
-  // ── Zone 1: reformat a raw export into the Modified layout ──────────────
+  // ── Zone 1: reformat a raw export into the Converted layout ─────────────
   (function setupConvert() {
     const dz     = document.getElementById("convert-drop-zone");
     const input  = document.getElementById("convert-file-input");
@@ -613,6 +615,7 @@
       result.style.display = "none"; status.style.display = "none";
       dz.style.display = ""; input.value = "";
     }
+    window.__resetZone1 = reset;   // let the Zone 2 flow clear Zone 1 too
 
     browse.addEventListener("click", e => { e.stopPropagation(); input.click(); });
     dz.addEventListener("click", () => input.click());
@@ -649,11 +652,11 @@
         dl.href = url;
         if (single) {
           const base = arr[0].name.replace(/\.[^.]+$/, "");
-          dl.download = `${base} (modified).xlsx`;
-          dlLabel.textContent = `Download ${base} (modified).xlsx`;
+          dl.download = `${base} (converted).xlsx`;
+          dlLabel.textContent = "Download File";
         } else {
-          dl.download = "PO Cost Changes (modified).zip";
-          dlLabel.textContent = `Download modified files (${arr.length})`;
+          dl.download = "PO Cost Changes (converted).zip";
+          dlLabel.textContent = "Download ZIP folder";
         }
         status.style.display = "none";
         result.style.display = "block";
@@ -713,10 +716,14 @@
     document.getElementById("file-list").style.display = "none";
     fileInput.value = "";
     ccFiles = [];
-    dropZone.querySelector("p").innerHTML = `Drag & drop your Excel or CSV files here, or <span class="browse-link" id="browse-link">browse</span>`;
+    dropZone.querySelector("p").innerHTML = `Drag &amp; drop your Excel or CSV files here, or <span class="browse-link" id="browse-link">browse</span>`;
     document.getElementById("browse-link").addEventListener("click", () => fileInput.click());
     refreshProcessButton();
     progressBar.style.width = "0%";
+    // Bring Zone 1 back (hidden once Zone 2 finished) and clear its state.
+    const z1 = document.getElementById("zone1-section");
+    if (z1) z1.style.display = "";
+    if (window.__resetZone1) window.__resetZone1();
   }
 
   document.getElementById("process-btn").addEventListener("click", () => {
@@ -907,6 +914,12 @@
   function showResults(jobId, data) {
     progressBar.style.width = "100%";
     statusText.textContent = "Done!";
+
+    // Zone 1 is no longer relevant once Zone 2 has produced output — hide the
+    // whole section and clear any files staged/converted there.
+    const z1 = document.getElementById("zone1-section");
+    if (z1) z1.style.display = "none";
+    if (window.__resetZone1) window.__resetZone1();
 
     setTimeout(() => {
       statusArea.style.display = "none";

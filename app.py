@@ -126,7 +126,7 @@ def convert():
     return send_file(
         io.BytesIO(cleaned),
         mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        as_attachment=True, download_name=f"{base} (modified).xlsx",
+        as_attachment=True, download_name=f"{base} (converted).xlsx",
     )
 
 
@@ -147,10 +147,10 @@ def convert_zip():
             except Exception as e:
                 return jsonify({"error": f"Failed on {f.filename}: {e}"}), 400
             base = os.path.splitext(f.filename)[0]
-            zf.writestr(f"{base} (modified).xlsx", cleaned)
+            zf.writestr(f"{base} (converted).xlsx", cleaned)
     zip_buf.seek(0)
     return send_file(zip_buf, mimetype="application/zip", as_attachment=True,
-                     download_name="PO Cost Changes (modified).zip")
+                     download_name="PO Cost Changes (converted).zip")
 
 
 @app.route("/upload", methods=["POST"])

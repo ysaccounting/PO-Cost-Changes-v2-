@@ -785,8 +785,8 @@ def test_zone1_convert_to_modified_round_trips():
 
     import openpyxl, io as _io
     wb = openpyxl.load_workbook(_io.BytesIO(modified))
-    assert wb.sheetnames == ["Modified"]
-    ws = wb["Modified"]
+    assert wb.sheetnames == ["Converted"]
+    ws = wb["Converted"]
     header = [c.value for c in ws[1]]
     assert header == processor.MODIFIED_COLUMNS          # exact layout
     assert "Team/Perfomer" in header                     # template spelling kept
@@ -813,7 +813,7 @@ def test_zone1_modified_is_pure_reformat_no_aggregation():
     ]
     modified = processor.convert_to_modified(_to_xlsx_bytes(rows), "f.xlsx")
     import openpyxl, io as _io
-    ws = openpyxl.load_workbook(_io.BytesIO(modified))["Modified"]
+    ws = openpyxl.load_workbook(_io.BytesIO(modified))["Converted"]
     assert ws.max_row - 1 == 2
     hdr = [c.value for c in ws[1]]
     # Start = initial, End = current
