@@ -407,10 +407,10 @@
   <h1>PO Cost Changes</h1>
   <p class="subtitle">Upload one or more TicketVault PO Cost Changes files (from the nightly data puller on Slack) to generate output files ready for QBO.</p>
 
-  <p class="zone-label">Zone 1 <span class="optional">(Optional)</span> — upload a raw PO Cost Changes file to get back a reformatted <strong>Modified</strong> version (cleaner column layout) you can review or edit, then drop into Zone 2.</p>
+  <p class="zone-label">Zone 1 (Optional) — Upload the Slack data puller version to receive back the traditional TicketVault PO Cost Changes screen version.</p>
   <div id="convert-drop-zone">
-    <p>Drag &amp; drop a <strong>PO Cost Changes</strong> file here, or <span class="browse-link" id="convert-browse-link">browse</span></p>
-    <p class="file-hint">Accepts .xlsx, .xlsm, .csv — multiple files come back as a zip</p>
+    <p>Drag & drop your Excel or CSV files here, or <span class="browse-link" id="convert-browse-link">browse</span></p>
+    <p class="file-hint">Accepts multiple files — downloads as zip if more than one</p>
   </div>
   <input type="file" id="convert-file-input" accept=".xlsx,.xlsm,.xls,.csv" style="display:none;" multiple />
   <div id="convert-file-list">
@@ -431,15 +431,15 @@
   </div>
 
   <div class="zone-divider"></div>
-  <p class="zone-label">Zone 2 <span class="optional">(Required)</span> — upload either a raw PO Cost Changes file or a Modified file from Zone 1.</p>
+  <p class="zone-label">Zone 2 (Required) — Upload either the Slack data puller version or the traditional version received back from Zone 1 above.</p>
 
   <div id="drop-zone" class="drop-zone">
     <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
       <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"
         d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5"/>
     </svg>
-    <p>Drag &amp; drop your <strong>PO Cost Changes</strong> Excel or CSV files here, or <span class="browse-link" id="browse-link">browse</span></p>
-    <p class="file-hint">Accepts .xlsx, .xlsm, .csv — select multiple files to merge</p>
+    <p>Drag & drop your Excel or CSV files here, or <span class="browse-link" id="browse-link">browse</span></p>
+    <p class="file-hint">Accepts multiple files and merges</p>
     <input type="file" id="file-input" accept=".xlsx,.xlsm,.xls,.csv" multiple />
   </div>
 
@@ -713,7 +713,7 @@
     document.getElementById("file-list").style.display = "none";
     fileInput.value = "";
     ccFiles = [];
-    dropZone.querySelector("p").innerHTML = `Drag &amp; drop your <strong>PO Cost Changes</strong> Excel or CSV files here, or <span class="browse-link" id="browse-link">browse</span>`;
+    dropZone.querySelector("p").innerHTML = `Drag & drop your Excel or CSV files here, or <span class="browse-link" id="browse-link">browse</span>`;
     document.getElementById("browse-link").addEventListener("click", () => fileInput.click());
     refreshProcessButton();
     progressBar.style.width = "0%";
