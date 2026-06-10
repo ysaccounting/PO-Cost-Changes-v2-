@@ -357,6 +357,30 @@
     }
     #modal-generate-btn:hover:not(:disabled) { background: #303f9f; }
     #modal-generate-btn:disabled { background: #c5cae9; cursor: default; }
+    /* No-Remove-column warning */
+    #remove-warn-overlay {
+      display: none; position: fixed; inset: 0;
+      background: rgba(0,0,0,0.45); z-index: 110;
+      align-items: center; justify-content: center;
+    }
+    #remove-warn-overlay.active { display: flex; }
+    #remove-warn-box {
+      background: #fff; border-radius: 16px; border: 0.5px solid #e0e0e0;
+      width: 100%; max-width: 480px; padding: 24px; margin: 16px;
+    }
+    #remove-warn-box h2 { font-size: 18px; font-weight: 600; margin: 0 0 8px; color: #c0392b; }
+    #remove-warn-box p { font-size: 13px; color: #555; margin: 0 0 12px; line-height: 1.5; }
+    #remove-warn-files {
+      margin: 0 0 12px; padding: 10px 14px 10px 30px; list-style: disc;
+      background: #fdecea; border: 1px solid #f5c6cb; border-radius: 8px;
+      font-size: 13px; color: #c0392b; font-weight: 600;
+    }
+    #remove-warn-files li { margin: 2px 0; word-break: break-all; }
+    #remove-warn-ok {
+      padding: 9px 22px; font-size: 13px; font-weight: 600; border-radius: 10px;
+      background: #3f51b5; color: #fff; border: none; cursor: pointer;
+    }
+    #remove-warn-ok:hover { background: #303f9f; }
     /* Zone 1 — convert (optional) */
     .zone-divider { height: 1px; background: #eee; margin: 28px 0 0; }
     #convert-drop-zone {
@@ -449,7 +473,7 @@
   </div>
 
   <div id="upload-screen-warning" class="upload-warning">
-    MAKE SURE TO ADD A "REMOVE" COLUMN (ANY COLUMN IS FINE) AND PUT AN "X" IN EACH COST CHANGE LINE FROM ACCOUNTING TEAM USERS THAT WERE ALREADY MADE IN QBO BEFORE UPLOADING THE DATA HERE. HERE IS THE LIST OF ACCOUNTING TEAM USERS TO LOOK OUT FOR:
+    MAKE SURE TO ADD THE "REMOVE" FIELD IN COLUMN AC AND PUT AN "X" IN EACH COST CHANGE LINE FROM ACCOUNTING TEAM USERS THAT WERE ALREADY MADE IN QBO BEFORE UPLOADING THE DATA HERE. HERE IS THE LIST OF ACCOUNTING TEAM USERS TO LOOK OUT FOR:
     <div class="upload-warning-users">
       <span>jhantz</span><span>jhantz-2</span><span>jhantz-3</span><span>bblumenthal</span>
       <span>yklein</span><span>awealcatch</span><span>cschlesinger</span><span>dbowden</span>
@@ -549,6 +573,18 @@
     <div class="modal-actions">
       <button id="modal-cancel-btn" onclick="cancelSelection()">Cancel</button>
       <button id="modal-generate-btn" onclick="generateFiles()" disabled>Generate files</button>
+    </div>
+  </div>
+</div>
+
+<div id="remove-warn-overlay">
+  <div id="remove-warn-box">
+    <h2>“Remove” column missing</h2>
+    <p>Processing is blocked. The required <strong>Remove</strong> column wasn’t found in:</p>
+    <ul id="remove-warn-files"></ul>
+    <p>Add a <strong>Remove</strong> column (put an <strong>X</strong> on each accounting-team cost-change line already entered in QBO) to each file listed above, then try again.</p>
+    <div class="modal-actions">
+      <button id="remove-warn-ok">OK</button>
     </div>
   </div>
 </div>
@@ -733,6 +769,7 @@
     currentJobId = null;
     _jobId = null; _data = null;
     document.getElementById("modal-overlay").classList.remove("active");
+    document.getElementById("remove-warn-overlay").classList.remove("active");
     clearInterval(pollTimer);
     resultsArea.style.display = "none";
     statusArea.style.display = "none";
@@ -772,33 +809,38 @@
 
   async function startProcessing() {
     if (ccFiles.length === 0) return;
+    errorBox.style.display = "none";
+
+    // Upload + validate first; stay on the upload screen until we know every
+    // file has a Remove column. A missing column hard-blocks here.
+    const formData = new FormData();
+    ccFiles.forEach(f => formData.append("file", f));
+
+    let res, data;
+    try {
+      res = await fetch("/upload", { method: "POST", body: formData });
+      data = await res.json();
+    } catch (e) {
+      showError("Upload failed. Please try again."); return;
+    }
+    if (res.status === 400 && data.missing_remove) {
+      showRemoveBlock(data.missing_remove);
+      return;
+    }
+    if (data.error) { showError(data.error); return; }
+
+    // Validated — switch to the processing view.
+    const jobId = data.job_id;
+    currentJobId = jobId;
     document.getElementById("zone2-label").style.display = "none";
     document.getElementById("file-list").style.display = "none";
     dropZone.style.display = "none";
     document.getElementById("process-btn").style.display = "none";
     document.getElementById("upload-screen-warning").style.display = "none";
-    errorBox.style.display = "none";
     statusArea.style.display = "block";
     resultsArea.style.display = "none";
     resetBtn.style.display = "none";
     clearBtn.style.display = "block";
-    progressBar.style.width = "15%";
-    statusText.textContent = `Uploading ${ccFiles.length} file${ccFiles.length > 1 ? "s" : ""}…`;
-
-    const formData = new FormData();
-    ccFiles.forEach(f => formData.append("file", f));
-
-    let jobId;
-    try {
-      const res = await fetch("/upload", { method: "POST", body: formData });
-      const data = await res.json();
-      if (data.error) { showError(data.error); return; }
-      jobId = data.job_id;
-      currentJobId = jobId;
-    } catch (e) {
-      showError("Upload failed. Please try again."); return;
-    }
-
     progressBar.style.width = "40%";
     statusText.textContent = "Processing file…";
     pollTimer = setInterval(() => pollStatus(jobId), 1500);
@@ -824,6 +866,20 @@
       showError("Lost connection. Please reload and try again.");
     }
   }
+
+  function showRemoveBlock(missingFiles) {
+    const ul = document.getElementById("remove-warn-files");
+    ul.innerHTML = "";
+    (missingFiles || []).forEach(name => {
+      const li = document.createElement("li");
+      li.textContent = name;
+      ul.appendChild(li);
+    });
+    document.getElementById("remove-warn-overlay").classList.add("active");
+  }
+  document.getElementById("remove-warn-ok").addEventListener("click", () => {
+    document.getElementById("remove-warn-overlay").classList.remove("active");
+  });
 
   function showModal(jobId, data) {
     progressBar.style.width = "100%";

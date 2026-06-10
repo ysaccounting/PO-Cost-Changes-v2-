@@ -17,7 +17,7 @@ import logging
 
 from flask import Flask, request, jsonify, send_file, render_template
 
-from processor import process_files, build_filtered_outputs, convert_to_modified
+from processor import process_files, build_filtered_outputs, convert_to_modified, files_missing_remove_column
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("po-cost-changes")
@@ -159,6 +159,15 @@ def upload():
     if not files or all(f.filename == "" for f in files):
         return jsonify({"error": "No PO Cost Changes files provided"}), 400
     file_list = [(f.read(), f.filename) for f in files if f.filename]
+
+    # Hard block: every uploaded file must contain a "Remove" column. Processing
+    # does not start until the user adds it to the file(s) listed below.
+    missing = files_missing_remove_column(file_list)
+    if missing:
+        return jsonify({
+            "error": "remove_column_missing",
+            "missing_remove": missing,
+        }), 400
 
     job_id = str(uuid.uuid4())
     write_job_status(job_id, "processing")

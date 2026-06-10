@@ -628,6 +628,39 @@ def test_remove_x_excludes_rows():
     assert res["excluded"]["po_count"] == 1
 
 
+def test_files_missing_remove_column_flags_only_files_without_it():
+    rows = [_row(PurchaseOrderID=1, TicketCostTotal=100, InitialTicketCostTotal=0)]
+    with_remove = _to_xlsx_bytes([{**rows[0], "Remove": ""}], extra_cols=["Remove"])
+    without_remove = _to_xlsx_bytes(rows)
+    missing = processor.files_missing_remove_column([
+        (with_remove, "has_it.xlsx"),
+        (without_remove, "missing.xlsx"),
+    ])
+    assert missing == ["missing.xlsx"]
+
+
+def test_files_missing_remove_column_empty_when_all_present():
+    rows = [_row(PurchaseOrderID=1, TicketCostTotal=100, InitialTicketCostTotal=0)]
+    a = _to_xlsx_bytes([{**rows[0], "Remove": ""}], extra_cols=["Remove"])
+    b = _to_xlsx_bytes([{**rows[0], "Remove": "X"}], extra_cols=["Remove"])
+    assert processor.files_missing_remove_column([(a, "a.xlsx"), (b, "b.xlsx")]) == []
+
+
+def test_files_missing_remove_column_detects_in_converted_file():
+    # A Zone 1 "Converted" workbook with a hand-added Remove column is accepted.
+    rows = [_row(PurchaseOrderID=1, TicketCostTotal=100, InitialTicketCostTotal=0)]
+    converted = processor.convert_to_modified(_to_xlsx_bytes(rows), "raw.xlsx")
+    # Without Remove -> flagged
+    assert processor.files_missing_remove_column([(converted, "conv.xlsx")]) == ["conv.xlsx"]
+    # Add a Remove column to the converted sheet -> accepted
+    import openpyxl, io as _io
+    wb = openpyxl.load_workbook(_io.BytesIO(converted))
+    ws = wb["Converted"]
+    ws.cell(row=1, column=ws.max_column + 1, value="Remove")
+    buf = _io.BytesIO(); wb.save(buf)
+    assert processor.files_missing_remove_column([(buf.getvalue(), "conv.xlsx")]) == []
+
+
 def test_purchase_detail_match_is_ignored():
     # All rows have match=True; none should be excluded (we ignore the flag).
     # Distinct performers so they don't collapse in the final aggregation.

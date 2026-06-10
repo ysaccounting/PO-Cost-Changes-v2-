@@ -780,6 +780,38 @@ def _read_one(content: bytes, filename: str) -> pd.DataFrame:
     return _normalize_new_export(raw, filename)
 
 
+def _file_has_remove_column(content: bytes, filename: str) -> bool:
+    """True if one uploaded file contains a 'Remove' column (case-insensitive,
+    any position). Reads only the header of the same sheet `_read_one` would
+    process, so detection matches how the file is actually ingested. On any read
+    error, returns True (don't block on Remove grounds — let normal processing
+    surface the real error)."""
+    suffix = Path(filename).suffix.lower()
+    try:
+        if suffix in (".xlsx", ".xlsm", ".xls"):
+            xls = pd.ExcelFile(io.BytesIO(content))
+            sheets = set(xls.sheet_names)
+            if "Source Data" in sheets and "Sheet" not in sheets:
+                target = "Source Data"
+            elif "Sheet" in sheets:
+                target = "Sheet"
+            else:
+                target = xls.sheet_names[0]
+            cols = pd.read_excel(xls, sheet_name=target, nrows=0).columns
+        else:
+            cols = pd.read_csv(io.BytesIO(content), nrows=0).columns
+    except Exception:
+        return True
+    return any(str(c).strip().lower() == "remove" for c in cols)
+
+
+def files_missing_remove_column(file_list) -> list:
+    """Given a list of (content, filename), return the filenames that do NOT
+    contain a 'Remove' column. Used to hard-block processing until every
+    uploaded file has the column."""
+    return [fn for (content, fn) in file_list if not _file_has_remove_column(content, fn)]
+
+
 # Internal-schema columns that must be present to re-ingest an output file's
 # "Source Data" tab. Everything else is derived or optional.
 REUPLOAD_REQUIRED = {
