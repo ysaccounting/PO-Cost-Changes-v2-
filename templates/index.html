@@ -45,12 +45,14 @@
     .drop-zone {
       border: 2px dashed #c5cae9;
       border-radius: 12px;
-      padding: 48px 24px;
+      padding: 28px 24px;
       text-align: center;
       cursor: pointer;
       transition: border-color 0.2s, background 0.2s;
       background: #fafafa;
     }
+
+    #file-list { margin-top: 12px; }
 
     .drop-zone.drag-over {
       border-color: #3f51b5;
@@ -433,16 +435,17 @@
 
   <div class="zone-divider"></div>
   </div>
-  <p class="zone-label">Zone 2 (Required) — Upload either the Slack data puller version or the traditional version received back from Zone 1 above.</p>
+  <p class="zone-label" id="zone2-label">Zone 2 (Required) — Upload either the Slack data puller version or the traditional version received back from Zone 1 above.</p>
 
   <div id="drop-zone" class="drop-zone">
-    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"
-        d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5"/>
-    </svg>
     <p>Drag &amp; drop your Excel or CSV files here, or <span class="browse-link" id="browse-link">browse</span></p>
     <p class="file-hint">Accepts multiple files and merges</p>
     <input type="file" id="file-input" accept=".xlsx,.xlsm,.xls,.csv" multiple />
+  </div>
+
+  <div id="file-list">
+    <div id="file-list-header"></div>
+    <div id="file-list-items"></div>
   </div>
 
   <div id="upload-screen-warning" class="upload-warning">
@@ -458,10 +461,6 @@
 
   <button id="process-btn" style="display:none; margin-top:20px; width:100%; padding:14px; background:#3f51b5; color:white; border:0; border-radius:8px; font-size:1rem; font-weight:600; cursor:pointer;" disabled>Add files to continue</button>
 
-  <div id="file-list">
-    <div id="file-list-header"></div>
-    <div id="file-list-items"></div>
-  </div>
   <div class="error-box" id="error-box"></div>
 
   <div id="status-area">
@@ -741,6 +740,7 @@
     resetBtn.style.display = "none";
     clearBtn.style.display = "none";
     dropZone.style.display = "";
+    document.getElementById("zone2-label").style.display = "";
     document.getElementById("upload-screen-warning").style.display = "";
     document.getElementById("file-list").style.display = "none";
     fileInput.value = "";
@@ -772,6 +772,7 @@
 
   async function startProcessing() {
     if (ccFiles.length === 0) return;
+    document.getElementById("zone2-label").style.display = "none";
     document.getElementById("file-list").style.display = "none";
     dropZone.style.display = "none";
     document.getElementById("process-btn").style.display = "none";
