@@ -424,7 +424,7 @@
     <p class="status-text" id="convert-status-text">Converting…</p>
   </div>
   <div id="convert-result">
-    <a id="convert-download-btn" href="#" download>⬇ <span id="convert-download-label">Download File</span></a>
+    <a id="convert-download-btn" href="#" download><span id="convert-download-label">Download File</span></a>
     <div class="convert-secondary">
       <button id="convert-again">Convert another</button>
       <button id="convert-clear-btn">Clear</button>
@@ -452,6 +452,7 @@
       <span>yklein</span><span>awealcatch</span><span>cschlesinger</span><span>dbowden</span>
       <span>macohen (not mcohen)</span><span>gbollag</span><span>mtawil</span><span>sgreenhouse</span>
       <span>msadriu</span><span>lrafuna</span><span>fajeti</span><span>mmeta</span>
+      <span>lbeqa</span><span>fhoxha</span><span>hmorina</span>
     </div>
   </div>
 
@@ -671,6 +672,7 @@
   browseLink.addEventListener("click", () => fileInput.click());
   fileInput.addEventListener("change", () => {
     if (fileInput.files.length) stageCcFiles(fileInput.files);
+    fileInput.value = "";
   });
 
   dropZone.addEventListener("dragover", e => { e.preventDefault(); dropZone.classList.add("drag-over"); });
@@ -681,11 +683,38 @@
     if (e.dataTransfer.files.length) stageCcFiles(e.dataTransfer.files);
   });
 
-  function stageCcFiles(files) {
-    ccFiles = Array.from(files);
-    const label = dropZone.querySelector("p");
-    label.innerHTML = `<strong>${ccFiles.length} PO Cost Changes file${ccFiles.length > 1 ? "s" : ""} staged</strong> — <span class="browse-link" id="cc-replace-link">replace</span>`;
-    document.getElementById("cc-replace-link").addEventListener("click", () => fileInput.click());
+  function stageCcFiles(fileList) {
+    Array.from(fileList).forEach(f => {
+      if (!ccFiles.some(x => x.name === f.name && x.size === f.size)) ccFiles.push(f);
+    });
+    renderCcList();
+  }
+
+  function removeCcFile(idx) {
+    ccFiles.splice(idx, 1);
+    renderCcList();
+  }
+
+  function renderCcList() {
+    const listEl = document.getElementById("file-list");
+    const header = document.getElementById("file-list-header");
+    const items  = document.getElementById("file-list-items");
+    if (ccFiles.length === 0) {
+      listEl.style.display = "none";
+      refreshProcessButton();
+      return;
+    }
+    header.textContent = `${ccFiles.length} file${ccFiles.length > 1 ? "s" : ""} selected`;
+    items.innerHTML = "";
+    ccFiles.forEach((f, idx) => {
+      const size = f.size < 1024*1024 ? (f.size/1024).toFixed(1)+"KB" : (f.size/1024/1024).toFixed(1)+"MB";
+      const div = document.createElement("div");
+      div.className = "file-item";
+      div.innerHTML = `<span class="file-name">📄 ${f.name}</span><span class="file-size">${size}</span><button class="file-remove" title="Remove">✕</button>`;
+      div.querySelector(".file-remove").addEventListener("click", () => removeCcFile(idx));
+      items.appendChild(div);
+    });
+    listEl.style.display = "block";
     refreshProcessButton();
   }
 
@@ -716,9 +745,7 @@
     document.getElementById("file-list").style.display = "none";
     fileInput.value = "";
     ccFiles = [];
-    dropZone.querySelector("p").innerHTML = `Drag &amp; drop your Excel or CSV files here, or <span class="browse-link" id="browse-link">browse</span>`;
-    document.getElementById("browse-link").addEventListener("click", () => fileInput.click());
-    refreshProcessButton();
+    renderCcList();
     progressBar.style.width = "0%";
     // Bring Zone 1 back (hidden once Zone 2 finished) and clear its state.
     const z1 = document.getElementById("zone1-section");
@@ -743,28 +770,9 @@
     resetBtn.style.display = "block";
   }
 
-  function showFileList() {
-    const listEl = document.getElementById("file-list");
-    const header = document.getElementById("file-list-header");
-    const items  = document.getElementById("file-list-items");
-    header.textContent = `${ccFiles.length} file${ccFiles.length > 1 ? "s" : ""} selected`;
-    items.innerHTML = "";
-    const fmt = f => {
-      const size = f.size < 1024*1024 ? (f.size/1024).toFixed(1)+"KB" : (f.size/1024/1024).toFixed(1)+"MB";
-      return `<span class="file-name">📄 ${f.name}</span><span class="file-size">${size}</span>`;
-    };
-    ccFiles.forEach(f => {
-      const div = document.createElement("div");
-      div.className = "file-item";
-      div.innerHTML = fmt(f);
-      items.appendChild(div);
-    });
-    listEl.style.display = "block";
-  }
-
   async function startProcessing() {
     if (ccFiles.length === 0) return;
-    showFileList();
+    document.getElementById("file-list").style.display = "none";
     dropZone.style.display = "none";
     document.getElementById("process-btn").style.display = "none";
     document.getElementById("upload-screen-warning").style.display = "none";
