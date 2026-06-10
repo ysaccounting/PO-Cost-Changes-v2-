@@ -62,7 +62,24 @@ gunicorn app:app --workers 1 --worker-class gthread --threads 4 --timeout 120
 
 ## How it works
 
-1. User drops one or more new-export `.xlsx` / `.xlsm` / `.csv` files.
+The UI has two zones. **Zone 1 (optional)** converts a raw export into a clean,
+editable file; **Zone 2 (required)** does the actual processing.
+
+**Zone 1 — reformat (optional).** `POST /convert` (one file) or `POST /convert_zip`
+(several) runs `convert_to_modified()`, which reads a raw PO Cost Changes export
+and returns a single-sheet **Modified** workbook: the same seat-level rows with
+columns renamed/reordered into a friendly review layout (the cost/qty fields
+split into Start = initial and End = current; five internal ID/match columns
+dropped). Values are preserved exactly — no aggregation, no date conversion. The
+user can review/edit it and feed it into Zone 2, which reads the Modified layout
+natively. Running a file through Zone 1 then Zone 2 is identical to uploading the
+raw file straight into Zone 2.
+
+**Zone 2 — process (required).**
+
+1. User drops one or more files — a raw new-export **or** a Modified file from
+   Zone 1 (a generated output workbook with a `Source Data` tab is also accepted
+   and re-processed).
 2. `POST /upload` saves them and kicks off a background thread running
    `process_files()`, which computes the data + per-company stats and pickles
    the intermediate DataFrames (it does **not** build the output files yet).
@@ -79,28 +96,6 @@ gunicorn app:app --workers 1 --worker-class gthread --threads 4 --timeout 120
 In the combined workbook, **Source Data and Excluded are always the full
 upload**; the Combined, Summary, Bills, and per-company tabs reflect only the
 selected companies.
-
-### Re-uploading an output file (edit-and-regenerate)
-
-Any generated output workbook can be **re-uploaded** after the user hand-edits
-its `Source Data` tab — fix a vendor or cost, add a `Remove` column with `X`
-to drop already-entered rows, delete rows, etc. `_read_one()` detects an output
-file by its `Source Data` tab (vs. the raw export's single `Sheet`) and routes
-it through `_normalize_reupload()`, which re-ingests those rows in the internal
-schema: it keeps the existing Adjustment Date, recomputes `Total Adjustment =
-End − Start` and the same-day exclusion flag, and honors a hand-added `Remove`
-column. Re-uploading an unedited output reproduces the original run exactly.
-
-### Live Nation (concert-season) collapse
-
-Concert Seasons / Live Nation Flex / (for YSA) Live Nation all resolve to a
-`Live Nation …` vendor. Because these are bought as a season, the per-event
-performer / email / order number isn't meaningful at the QBO level. Right after
-the vendor rename (before aggregation) those three keys are blanked and the
-detail is labeled `Various / Various`, so every Live Nation row for a company
-(per date + vendor) aggregates into a single line whose memo reads
-`Various / Various / Cost Changes (Company)`. Mirrors the Purchase Details app's
-LN-seasons collapse; Live Nation Extras is included.
 
 ## New-export columns used
 
@@ -187,14 +182,12 @@ labels are defined in `FILE_LABELS`, the Company-value renames in
 `COMPANY_VALUE_RENAMES`, and the QBO→Company-value map in `DISPLAY_NAMES`.
 
 The downloadable **individual company files lead with their data sheet
-(Expenses or Bills), then carry a `Summary` pivot (same Company › Vendor ›
-Description layout as the combined file, scoped to that company), then
-`Source Data` and `Excluded` tabs** — also scoped to that company. So each file
-is self-contained: the company's pivot, its own input rows, and exactly which
-of them were removed. (The Excluded tab is colored red when that company had
-nothing excluded.) Expenses and bills ship as separate files; a company with no
-negative adjustments gets no expenses file, and one with no positive
-adjustments gets no bills file.
+(Expenses or Bills) and then carry two more tabs — `Source Data` and
+`Excluded` — scoped to that company**, so each file is self-contained: the
+company's own input rows and exactly which of them were removed. (The Excluded
+tab is colored red when that company had nothing excluded.) Expenses and bills
+ship as separate files; a company with no negative adjustments gets no expenses
+file, and one with no positive adjustments gets no bills file.
 
 ## Per-company "Bills" files (QBO import format)
 
@@ -274,6 +267,8 @@ ones on Ticketmaster AM) are kept.
 | Method | Path | Returns |
 |--------|------|---------|
 | GET | `/` | HTML drag-and-drop UI |
+| POST | `/convert` | Zone 1: one raw export → single-sheet **Modified** `.xlsx` |
+| POST | `/convert_zip` | Zone 1: several raw exports → zip of Modified files |
 | POST | `/upload` | `{job_id}` — kicks off background processing |
 | GET | `/status/<job_id>` | `{status, date_range, all_companies, stats, excluded, ignored_companies, ...}` |
 | POST | `/configure/<job_id>` | `{selected_companies}` → builds the chosen companies' files; returns `{status, companies, bills_companies, ...}` |

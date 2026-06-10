@@ -17,7 +17,7 @@ import logging
 
 from flask import Flask, request, jsonify, send_file, render_template
 
-from processor import process_files, build_filtered_outputs
+from processor import process_files, build_filtered_outputs, convert_to_modified
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("po-cost-changes")
@@ -106,6 +106,51 @@ def run_job(job_id: str, file_list: list[tuple[bytes, str]]) -> None:
 @app.route("/")
 def index():
     return render_template("index.html")
+
+
+@app.route("/convert", methods=["POST"])
+def convert():
+    """Zone 1 (single file): clean one raw PO Cost Changes export into a
+    Source Data workbook for review/edit, then upload into Zone 2."""
+    f = request.files.get("file")
+    if not f or not f.filename:
+        return jsonify({"error": "No file provided"}), 400
+    try:
+        cleaned = convert_to_modified(f.read(), f.filename)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        log.exception("Convert failed")
+        return jsonify({"error": f"Conversion failed: {e}"}), 500
+    base = os.path.splitext(f.filename)[0]
+    return send_file(
+        io.BytesIO(cleaned),
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        as_attachment=True, download_name=f"{base} (modified).xlsx",
+    )
+
+
+@app.route("/convert_zip", methods=["POST"])
+def convert_zip():
+    """Zone 1 (multiple files): clean each raw export independently and return
+    them together as a zip."""
+    files = request.files.getlist("file")
+    if not files or all(f.filename == "" for f in files):
+        return jsonify({"error": "No files provided"}), 400
+    zip_buf = io.BytesIO()
+    with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for f in files:
+            if not f.filename:
+                continue
+            try:
+                cleaned = convert_to_modified(f.read(), f.filename)
+            except Exception as e:
+                return jsonify({"error": f"Failed on {f.filename}: {e}"}), 400
+            base = os.path.splitext(f.filename)[0]
+            zf.writestr(f"{base} (modified).xlsx", cleaned)
+    zip_buf.seek(0)
+    return send_file(zip_buf, mimetype="application/zip", as_attachment=True,
+                     download_name="PO Cost Changes (modified).zip")
 
 
 @app.route("/upload", methods=["POST"])

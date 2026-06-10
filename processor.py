@@ -324,18 +324,15 @@ def transform(
     out = out.drop(columns=["VenueName"], errors="ignore")
 
     # 6b. Live Nation (concert-season) collapse. Concert Seasons / Live Nation
-    #     Flex / YSA Live Nation all end up as a "Live Nation …" vendor. These
-    #     are bought as a season, so the per-event performer / email / order
-    #     number isn't meaningful at the QBO level. Blank those three keys and
-    #     label the detail "Various / Various" so every Live Nation row for a
-    #     company (per date + vendor) aggregates into a single line whose memo
-    #     reads "Various / Various … (Company)". Mirrors the Purchase Details
-    #     app's LN-seasons collapse. (Live Nation Extras is included, matching
-    #     PD's "LN Extras".)
+    #     Flex / YSA Live Nation all become a "Live Nation …" vendor. Bought as
+    #     a season, so the per-event performer / email / order isn't meaningful
+    #     for QBO: blank those three keys and label the detail "Various /
+    #     Various" so every Live Nation row for a company (per date + vendor)
+    #     aggregates into one line whose memo reads
+    #     "Various / Various / Cost Changes (Company) (PO created date …)".
+    #     Mirrors the Purchase Details app (Live Nation Extras included).
     if not out.empty:
-        ln_mask = (
-            out["Vendor"].astype("string").str.contains("Live Nation", case=False, na=False)
-        )
+        ln_mask = out["Vendor"].astype("string").str.contains("Live Nation", case=False, na=False)
         if ln_mask.any():
             out.loc[ln_mask, "Team/Performer"] = "Various / Various"
             out.loc[ln_mask, "AccountEmail"] = ""
@@ -498,6 +495,50 @@ NEW_REQUIRED = {
     "InitialTicketCostTotal", "TicketCostTotal", "AdjustedDateTimeUTC",
     "IsCancelled", "UpdateUser",
 }
+
+# ── Zone 1 "Modified" reformatting ──────────────────────────────────────────
+# A human-readable reformat of the raw seat-level export: rename + reorder, and
+# split the cost/qty fields into Start (initial) and End (current). The five
+# internal ID/match columns are dropped. Values and seat-level rows are kept
+# exactly — no aggregation, no date conversion. Layout matches the user's
+# Raw → Modified template (including the "Team/Perfomer" header spelling).
+RAW_TO_MODIFIED = [
+    ("CompanyName",            "Company"),
+    ("PurchaseOrderID",        "PO #"),
+    ("AdjustedDateTimeUTC",    "Adjustment Date"),
+    ("Vendor",                 "Vendor"),
+    ("PerformerName",          "Team/Perfomer"),
+    ("SecondaryPerformerName", "Opponent/Performer"),
+    ("EventDate",              "Event Date"),
+    ("VenueName",              "Venue"),
+    ("Section",                "Sec"),
+    ("Row",                    "Row"),
+    ("StartSeat",              "Start Seat"),
+    ("EndSeat",                "End Seat"),
+    ("ExtPONumber",            "Ext PO #"),
+    ("AccountEmail",           "Account Email"),
+    ("IsCancelled",            "Cancelled"),
+    ("UpdateUser",             "User"),
+    ("TicketCost",             "Per Ticket End"),
+    ("InitialTicketCost",      "Per Ticket Start"),
+    ("TicketCostTotal",        "Total Ticket End"),
+    ("InitialTicketCostTotal", "Total Ticket Start"),
+    ("Quantity",               "Qty End"),
+    ("InitialQuantity",        "Qty Start"),
+    ("CreatedDate",            "CreatedDate"),
+]
+MODIFIED_COLUMNS = [m for _, m in RAW_TO_MODIFIED]
+# Reverse map for reading a Modified file back in Zone 2. Accept both the
+# template's "Team/Perfomer" spelling and the corrected "Team/Performer".
+MODIFIED_TO_RAW = {m: r for r, m in RAW_TO_MODIFIED}
+MODIFIED_TO_RAW["Team/Performer"] = "PerformerName"
+# Signature columns unique to the Modified layout.
+_MODIFIED_SIGNATURE = {"Total Ticket Start", "Total Ticket End", "PO #"}
+
+
+def _is_modified_format(df: pd.DataFrame) -> bool:
+    return _MODIFIED_SIGNATURE.issubset(set(df.columns))
+
 # Timezone the UTC timestamps are converted to before the date is taken.
 # Only used as a FALLBACK when the filename has no parseable date (see
 # _filename_adjustment_date / the Adjustment Date override below).
@@ -550,7 +591,7 @@ def _read_raw(content: bytes, filename: str) -> pd.DataFrame:
     dtype keys are ignored by pandas when the column isn't present."""
     suffix = Path(filename).suffix.lower()
     buf = io.BytesIO(content)
-    str_cols = {"ExtPONumber": str}
+    str_cols = {"ExtPONumber": str, "Ext PO #": str}
     if suffix in (".xlsx", ".xlsm", ".xls"):
         try:
             return pd.read_excel(buf, sheet_name="Sheet", dtype=str_cols)
@@ -669,15 +710,56 @@ def _normalize_new_export(df: pd.DataFrame, filename: str) -> pd.DataFrame:
     return out
 
 
+SOURCE_VIEW_ORDER = [
+    "Company", "PO #", "Vendor", "Team/Performer",
+    "Ticket Cost Total Start", "Ticket Cost Total End", "User",
+    "Total Adjustment", "Cancelled", "Adjustment Date",
+    "AccountEmail", "ExtPONumber", "CreatedDate",
+]
+
+
+def _order_source_view(df: pd.DataFrame) -> pd.DataFrame:
+    """Put the internal-schema columns in the familiar Source Data order, with
+    any extras (e.g. VenueName, Remove) kept at the end and helper columns
+    dropped."""
+    front = [c for c in SOURCE_VIEW_ORDER if c in df.columns]
+    rest = [c for c in df.columns if c not in front and not str(c).startswith("_")]
+    return df[front + rest]
+
+
+def convert_new_format(file_bytes: bytes, filename: str = "") -> bytes:
+    """Zone 1 converter: read a raw PO Cost Changes export and return a single
+    'Source Data' sheet of the normalized, cleaner data — the same internal
+    schema shown on the Source Data tab of the full outputs.
+
+    The user can review/edit this file (fix a vendor or cost, add a 'Remove'
+    column with an X, delete rows) and then upload it into Zone 2, which reads
+    the 'Source Data' tab via the re-upload path. A bad file raises ValueError,
+    surfaced to the caller.
+    """
+    df = _read_one(file_bytes, filename)
+
+    # Drop the same-day helper if present, apply the Cancelled override so the
+    # Total Adjustment matches the Source Data tab, then order the columns.
+    df = df.drop(columns=[EXCLUDE_SAME_DATE_COL], errors="ignore")
+    view = _order_source_view(_apply_cancelled_override_raw(df)).reset_index(drop=True)
+
+    wb = openpyxl.Workbook()
+    wb.remove(wb.active)
+    _write_sheet(wb, "Source Data", view)
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
 def _read_one(content: bytes, filename: str) -> pd.DataFrame:
     """Read one uploaded file and normalize it to the internal schema.
 
     Two accepted shapes:
       * a fresh TicketVault PO Cost Changes export (single 'Sheet'), or
-      * one of THIS app's own output workbooks — detected by a 'Source Data'
-        tab — re-uploaded after the user hand-edited that tab. In that case we
-        re-ingest the edited Source Data rows so the whole bundle regenerates
-        with their changes.
+      * one of THIS app's own output workbooks (or a Zone 1 converted file) —
+        detected by a 'Source Data' tab — re-uploaded after the user hand-edited
+        that tab. In that case we re-ingest the edited Source Data rows.
     """
     suffix = Path(filename).suffix.lower()
     if suffix in (".xlsx", ".xlsm", ".xls"):
@@ -686,12 +768,15 @@ def _read_one(content: bytes, filename: str) -> pd.DataFrame:
             sheets = set(xls.sheet_names)
         except Exception:
             sheets = set()
-        # An output workbook has a 'Source Data' tab and no raw-export 'Sheet'.
         if "Source Data" in sheets and "Sheet" not in sheets:
             sd = pd.read_excel(xls, sheet_name="Source Data", dtype={"ExtPONumber": str})
             return _normalize_reupload(sd, filename)
 
     raw = _read_raw(content, filename)
+    # A Zone 1 "Modified" file: rename its columns back to the raw export names
+    # and process exactly like the raw export (it's the same data, reformatted).
+    if _is_modified_format(raw):
+        raw = raw.rename(columns=MODIFIED_TO_RAW)
     return _normalize_new_export(raw, filename)
 
 
@@ -704,27 +789,22 @@ REUPLOAD_REQUIRED = {
 
 
 def _normalize_reupload(df: pd.DataFrame, filename: str) -> pd.DataFrame:
-    """Re-ingest the 'Source Data' tab of one of this app's output workbooks.
+    """Re-ingest a 'Source Data' tab (from a full output workbook or a Zone 1
+    converted file). The tab is already in the internal schema, so columns pass
+    straight through and only the derived bits are recomputed:
+      * Total Adjustment = End − Start  (so manual cost edits take effect)
+      * the same-day exclusion flag, from Adjustment Date vs CreatedDate
 
-    The tab is already in the internal pipeline schema (raw Company, raw
-    Vendor, VenueName, the dates, etc.), so columns pass straight through and
-    only the derived bits are recomputed the way a fresh upload would:
-      * Total Adjustment = End − Start  (so manual cost edits take effect, and
-        transform() can re-apply the Cancelled override)
-      * the same-day exclusion flag, recomputed from Adjustment Date vs
-        CreatedDate at the date level
-
-    Adjustment Date is taken as-is from the sheet (an output file's name is a
-    date range, not a YYYY-MM-DD, so there's nothing to derive from it). A
-    'Remove' column is honored if the user added one to the tab.
+    Adjustment Date is taken as-is from the sheet. A 'Remove' column is honored
+    if the user added one.
     """
     df = df.rename(columns={c: str(c).strip() for c in df.columns})
 
     missing = REUPLOAD_REQUIRED - set(df.columns)
     if missing:
         raise ValueError(
-            f"{filename!r} looks like a PO Cost Changes output file, but its "
-            f"'Source Data' tab is missing columns: {sorted(missing)}."
+            f"{filename!r} looks like a PO Cost Changes output/converted file, but "
+            f"its 'Source Data' tab is missing columns: {sorted(missing)}."
         )
 
     out = pd.DataFrame()
@@ -743,7 +823,6 @@ def _normalize_reupload(df: pd.DataFrame, filename: str) -> pd.DataFrame:
     else:
         out["Cancelled"] = pd.Series([""] * len(df), dtype="string")
 
-    # Keep the date already on the sheet (date-only, US Central).
     out["Adjustment Date"] = pd.to_datetime(df.get("Adjustment Date"), errors="coerce")
 
     out["AccountEmail"] = df["AccountEmail"].map(_clean_key_str) if "AccountEmail" in df.columns else ""
@@ -754,7 +833,8 @@ def _normalize_reupload(df: pd.DataFrame, filename: str) -> pd.DataFrame:
     else:
         out["CreatedDate"] = pd.NaT
 
-    # Same-day exclusion — both dates already US Central; blank never matches.
+    # Same-day exclusion — recompute from Adjustment Date vs CreatedDate at the
+    # date level (both already US Central; blank CreatedDate never matches).
     adj = pd.to_datetime(out["Adjustment Date"], errors="coerce").dt.normalize()
     cre = out["CreatedDate"]
     same_day = adj.eq(cre) & adj.notna() & cre.notna()
@@ -1153,9 +1233,9 @@ def _write_summary_sheet(wb, combined_ledger: pd.DataFrame) -> None:
 
 
 def _combined_ledger(bills_df: pd.DataFrame, expenses_df: pd.DataFrame) -> pd.DataFrame:
-    """The 'Combined' ledger: one row per aggregated event — bills as-is plus
-    the negative (Inventory Asset) leg of each expense pair — ordered by
-    Expense #. Used for the Combined tab and the Summary pivot."""
+    """The 'Combined' ledger: bills as-is plus the negative (Inventory Asset)
+    leg of each expense pair, ordered by Expense #. Used for the Combined tab
+    and the Summary pivot."""
     drop_helper = lambda d: d.drop(columns=[c for c in ["_display_label"] if c in d.columns])
     bills_visible = drop_helper(bills_df)
     expenses_visible = drop_helper(expenses_df)
@@ -1191,9 +1271,7 @@ def _build_combined_workbook(
     bills_visible = drop_helper(bills_df)
     expenses_visible = drop_helper(expenses_df)
 
-    # 'Combined' = every aggregated event as a single ledger row:
-    #   bills as-is + the negative (Inventory Asset) leg of expenses,
-    #   ordered by Expense #.
+    # 'Combined' = every aggregated event as a single ledger row.
     combined_ledger = _combined_ledger(bills_df, expenses_df)
 
     wb = openpyxl.Workbook()
@@ -1273,20 +1351,14 @@ def _build_company_file(
     excluded_view: pd.DataFrame | None = None,
     summary_ledger: pd.DataFrame | None = None,
 ) -> bytes:
-    """Per-company download file. Tab 1 is the data sheet (Expenses or Bills);
-    tab 2 is that company's Summary pivot (same layout as the combined file);
-    tabs 3 and 4 are its own Source Data (input rows) and Excluded (removed
-    rows)."""
+    """Per-company download file. Tab 1 = data sheet (Expenses or Bills); tab 2
+    = that company's Summary pivot; tabs 3/4 = its own Source Data and
+    Excluded."""
     wb = openpyxl.Workbook()
     wb.remove(wb.active)
 
     _write_sheet(wb, first_sheet_name, first_df.reset_index(drop=True))
-
-    # Summary pivot for just this company (Company > Vendor > Description).
-    _write_summary_sheet(
-        wb,
-        summary_ledger if summary_ledger is not None else pd.DataFrame(),
-    )
+    _write_summary_sheet(wb, summary_ledger if summary_ledger is not None else pd.DataFrame())
 
     src_rows, exc_rows = _company_views(source_view, excluded_view, label)
     _write_sheet(wb, "Source Data", src_rows)
@@ -1306,9 +1378,7 @@ def _build_company_workbook(
     excluded_view: pd.DataFrame | None = None,
     summary_ledger: pd.DataFrame | None = None,
 ) -> bytes:
-    """Per-company Expenses file: Expenses sheet + Summary + Source Data +
-    Excluded tabs. (Bills ship separately as the per-company PD-format bills
-    files.)"""
+    """Per-company Expenses file: Expenses + Summary + Source Data + Excluded."""
     if "_display_label" in expenses_df.columns:
         e = expenses_df[expenses_df["_display_label"] == label].drop(columns=["_display_label"])
     else:
@@ -1623,19 +1693,9 @@ def build_filtered_outputs(
         pd_bills_df=pd_bills,
     )
 
-    # Per-company Combined ledger slices drive each file's Summary pivot. Slice
-    # bills_df / expenses_df by their "_display_label" (the same label used for
-    # the per-company files) BEFORE building the ledger — the ledger's own
-    # Company column holds the renamed value, not the short label.
     def _company_ledger(name: str) -> pd.DataFrame:
-        if "_display_label" in bills_df.columns:
-            b = bills_df[bills_df["_display_label"] == name]
-        else:
-            b = bills_df.iloc[0:0]
-        if "_display_label" in expenses_df.columns:
-            e = expenses_df[expenses_df["_display_label"] == name]
-        else:
-            e = expenses_df.iloc[0:0]
+        b = bills_df[bills_df["_display_label"] == name] if "_display_label" in bills_df.columns else bills_df.iloc[0:0]
+        e = expenses_df[expenses_df["_display_label"] == name] if "_display_label" in expenses_df.columns else expenses_df.iloc[0:0]
         return _combined_ledger(b, e)
 
     companies_with_expenses = (
@@ -1666,3 +1726,63 @@ def build_filtered_outputs(
         "companies": company_files,
         "bills_files": bills_files,
     }
+
+
+def convert_to_modified(file_bytes: bytes, filename: str) -> bytes:
+    """Zone 1 conversion: reformat one raw PO Cost Changes export into the
+    friendly **Modified** review layout — renamed/reordered columns, the
+    cost/qty fields split into Start (initial) and End (current), and the five
+    internal ID/match columns dropped. Values and seat-level rows are preserved
+    exactly (no aggregation, no date conversion).
+
+    The user can review/edit this file and feed it into Zone 2, which reads the
+    Modified layout natively. Zone 1 → Zone 2 is equivalent to uploading the
+    raw export straight into Zone 2.
+    """
+    raw = _read_raw(file_bytes, filename)
+
+    # Already a Modified file? Just normalize column order and pass through.
+    if _is_modified_format(raw):
+        out = pd.DataFrame({c: (raw[c] if c in raw.columns else pd.NA) for c in MODIFIED_COLUMNS})
+    else:
+        out = pd.DataFrame()
+        for raw_col, mod_col in RAW_TO_MODIFIED:
+            out[mod_col] = raw[raw_col] if raw_col in raw.columns else pd.NA
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Modified"
+    _write_modified_sheet(ws, out)
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def _write_modified_sheet(ws, df: pd.DataFrame) -> None:
+    """Write the Modified review sheet: header band + values exactly as read
+    (NaN/NaT → blank). Light styling, frozen header, autosized columns."""
+    from openpyxl.styles import Font, PatternFill, Alignment
+
+    header_font = Font(bold=True, color="FFFFFF", size=10)
+    header_fill = PatternFill("solid", start_color="3F51B5")
+    for ci, col in enumerate(df.columns, 1):
+        cell = ws.cell(row=1, column=ci, value=col)
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.alignment = Alignment(horizontal="left")
+
+    for ri, (_, row) in enumerate(df.iterrows(), 2):
+        for ci, col in enumerate(df.columns, 1):
+            v = row[col]
+            if v is None or (not isinstance(v, (list, tuple)) and pd.isna(v)):
+                v = None
+            elif isinstance(v, (pd.Timestamp,)):
+                v = v.to_pydatetime()
+            ws.cell(row=ri, column=ci, value=v)
+
+    ws.freeze_panes = "A2"
+    for ci, col in enumerate(df.columns, 1):
+        width = max(len(str(col)) + 2, 12)
+        ws.column_dimensions[openpyxl.utils.get_column_letter(ci)].width = min(width, 40)
+

@@ -683,9 +683,6 @@ def test_real_samples_reconcile():
 # ---------------------------------------------------------------------------
 
 def test_live_nation_collapses_to_various():
-    # Concert-season rows that become a "Live Nation …" vendor collapse to a
-    # single "Various / Various" line per company/date/vendor, dropping the
-    # per-event performer / email / order detail.
     rows = [
         _row(PurchaseOrderID=1, CompanyName="YSA", Vendor="Concert Seasons",
              VenueName="Jiffy Lube Live", PerformerName="Band A",
@@ -699,19 +696,17 @@ def test_live_nation_collapses_to_various():
     res = processor.process_files([(_to_xlsx_bytes(rows), "PO_Cost_Changes_2026-06-02.xlsx")])
     cl = res["_cleaned"]
     ln = cl[cl["Vendor"].str.contains("Live Nation")]
-    assert len(ln) == 1                                    # the two rows merged
+    assert len(ln) == 1
     r = ln.iloc[0]
     assert r["Team/Performer"] == "Various / Various"
     assert r["AccountEmail"] == "" and r["ExtPONumber"] == ""
-    assert r["Total Adjustment"] == 250                    # 100 + 150 summed
+    assert r["Total Adjustment"] == 250
 
 
 def test_non_live_nation_keeps_detail():
-    rows = [
-        _row(PurchaseOrderID=1, CompanyName="YSA", Vendor="SeatGeek",
-             PerformerName="Knicks", AccountEmail="c@x.com", ExtPONumber="ORD333",
-             InitialTicketCostTotal=0, TicketCostTotal=50),
-    ]
+    rows = [_row(PurchaseOrderID=1, CompanyName="YSA", Vendor="SeatGeek",
+                 PerformerName="Knicks", AccountEmail="c@x.com", ExtPONumber="ORD333",
+                 InitialTicketCostTotal=0, TicketCostTotal=50)]
     res = processor.process_files([(_to_xlsx_bytes(rows), "f.xlsx")])
     r = res["_cleaned"].iloc[0]
     assert r["Team/Performer"] == "Knicks"
@@ -719,7 +714,7 @@ def test_non_live_nation_keeps_detail():
 
 
 # ---------------------------------------------------------------------------
-# Re-uploading an app output file (edited Source Data tab)
+# Re-uploading an app output file (edited Source Data tab) + Zone 1 convert
 # ---------------------------------------------------------------------------
 
 def _combined_bytes(rows):
@@ -763,13 +758,65 @@ def test_reupload_honors_hand_added_remove_flag():
     ]
     res1, combined = _combined_bytes(rows)
     assert res1["excluded"]["row_count"] == 0
-
     wb = openpyxl.load_workbook(_io.BytesIO(combined))
     ws = wb["Source Data"]
     col = ws.max_column + 1
     ws.cell(row=1, column=col, value="Remove")
     ws.cell(row=2, column=col, value="X")
     buf = _io.BytesIO(); wb.save(buf)
-
     res2 = processor.process_files([(buf.getvalue(), "edited - Combined - June.xlsx")])
     assert res2["excluded"]["row_count"] == 1
+
+
+def test_zone1_convert_to_modified_round_trips():
+    # Zone 1 reformats raw -> Modified (rename/reorder, values unchanged, no
+    # aggregation). Feeding the Modified file into Zone 2 must equal feeding the
+    # raw export into Zone 2, including same-day exclusions.
+    rows = [
+        _row(PurchaseOrderID=1, CompanyName="YSA", PerformerName="A",
+             AccountEmail="a@b.com", InitialTicketCostTotal=0, TicketCostTotal=100,
+             AdjustedDateTimeUTC="2026-05-30T18:00:00", CreatedDate="2026-05-30T18:00:00"),
+        _row(PurchaseOrderID=2, CompanyName="YSA", PerformerName="B",
+             AccountEmail="b@b.com", InitialTicketCostTotal=0, TicketCostTotal=80,
+             AdjustedDateTimeUTC="2026-05-30T18:00:00", CreatedDate="2026-05-20T18:00:00"),
+    ]
+    raw_bytes = _to_xlsx_bytes(rows)
+    modified = processor.convert_to_modified(raw_bytes, "PO_Cost_Changes_2026-05-30.xlsx")
+
+    import openpyxl, io as _io
+    wb = openpyxl.load_workbook(_io.BytesIO(modified))
+    assert wb.sheetnames == ["Modified"]
+    ws = wb["Modified"]
+    header = [c.value for c in ws[1]]
+    assert header == processor.MODIFIED_COLUMNS          # exact layout
+    assert "Team/Perfomer" in header                     # template spelling kept
+    assert ws.max_row - 1 == len(rows)                   # seat-level rows preserved
+
+    raw = processor.process_files([(raw_bytes, "PO_Cost_Changes_2026-05-30.xlsx")])
+    mod = processor.process_files([(modified, "x (modified).xlsx")])
+    assert raw["stats"]["Combined"] == mod["stats"]["Combined"]
+    assert raw["excluded"]["row_count"] == mod["excluded"]["row_count"]
+    assert raw["date_range"] == mod["date_range"]
+    # Row 1 (same created+adjusted day) excluded; row 2 kept.
+    assert raw["excluded"]["row_count"] == 1
+
+
+def test_zone1_modified_is_pure_reformat_no_aggregation():
+    # Two seat lines on the same PO must stay as two rows (no aggregation).
+    rows = [
+        _row(PurchaseOrderID=9, CompanyName="YSA", PerformerName="A",
+             Section="100", Row="A", StartSeat=1, EndSeat=2,
+             InitialTicketCostTotal=50, TicketCostTotal=20),
+        _row(PurchaseOrderID=9, CompanyName="YSA", PerformerName="A",
+             Section="100", Row="B", StartSeat=1, EndSeat=2,
+             InitialTicketCostTotal=60, TicketCostTotal=30),
+    ]
+    modified = processor.convert_to_modified(_to_xlsx_bytes(rows), "f.xlsx")
+    import openpyxl, io as _io
+    ws = openpyxl.load_workbook(_io.BytesIO(modified))["Modified"]
+    assert ws.max_row - 1 == 2
+    hdr = [c.value for c in ws[1]]
+    # Start = initial, End = current
+    start = ws.cell(row=2, column=hdr.index("Total Ticket Start") + 1).value
+    end = ws.cell(row=2, column=hdr.index("Total Ticket End") + 1).value
+    assert start == 50 and end == 20
