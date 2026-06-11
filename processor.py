@@ -912,7 +912,8 @@ def _normalize_reupload(df: pd.DataFrame, filename: str) -> pd.DataFrame:
 def _write_sheet(wb, sheet_name: str, df: pd.DataFrame) -> None:
     """Write df to a new sheet with the same styling as the reference project:
     blue header, alternating row fills, borders, frozen header, auto-filter,
-    currency formatting on money columns, mm/dd/yyyy on Adjustment Date.
+    currency formatting on money columns, mm/dd/yyyy on Adjustment Date, and a
+    yellow highlight on any "User" cell that is a known accounting-team user.
 
     Sheet names are sanitized to Excel's rules (≤31 chars, no `:\\/?*[]`).
     """
@@ -952,6 +953,11 @@ def _write_sheet(wb, sheet_name: str, df: pd.DataFrame) -> None:
             cell.alignment = Alignment(vertical="center")
             cell.border = border
             cell.fill = row_fill
+            # Flag accounting-team users (overrides the alternating row fill).
+            # Only sheets carrying a "User" column (Source Data / Excluded) are
+            # affected; everything else is untouched.
+            if col_name == "User" and _is_accounting_user(val):
+                cell.fill = ACCOUNTING_FILL
             if col_name in ("Adjustment Date", "Date", "CreatedDate", "PO Created") and val is not None:
                 cell.number_format = "mm/dd/yyyy"
             elif col_name in money_cols and val is not None:

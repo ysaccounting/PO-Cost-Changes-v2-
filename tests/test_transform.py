@@ -947,3 +947,27 @@ def test_accounting_users_match_ui_list():
     ui_names = {re.sub(r"\(.*?\)", "", s).strip().lower()
                 for s in re.findall(r"<span>(.*?)</span>", block)}
     assert ui_names == set(processor.ACCOUNTING_USERS)
+
+
+def test_zone2_highlights_accounting_users_in_source_data():
+    # The User column on Zone 2 Source Data / Excluded tabs highlights
+    # accounting-team users, same as the Zone 1 Converted sheet.
+    import openpyxl
+    rows = [
+        _row(PurchaseOrderID=1, CompanyName="YSA", UpdateUser="bblumenthal",
+             InitialTicketCostTotal=0, TicketCostTotal=100),   # accounting
+        _row(PurchaseOrderID=2, CompanyName="YSA", UpdateUser="someoneelse",
+             InitialTicketCostTotal=0, TicketCostTotal=50),    # not accounting
+    ]
+    out = processor.process_files([(_to_xlsx_bytes(rows), "PO_Cost_Changes_2026-05-30.xlsx")])
+    res = processor.build_filtered_outputs(
+        out["_cleaned"], out["_source_view"], out["_excluded_view"],
+        out["date_range"], out["all_companies"],
+    )
+    ws = openpyxl.load_workbook(io.BytesIO(res["combined"]))["Source Data"]
+    hdr = [c.value for c in ws[1]]
+    ui = hdr.index("User") + 1
+    yellow = processor.ACCOUNTING_FILL.fgColor.rgb
+    fills = {ws.cell(r, ui).value: _fill_rgb(ws.cell(r, ui)) for r in range(2, ws.max_row + 1)}
+    assert fills["bblumenthal"] == yellow
+    assert fills["someoneelse"] != yellow
