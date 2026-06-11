@@ -535,6 +535,32 @@ MODIFIED_TO_RAW["Team/Performer"] = "PerformerName"
 # Signature columns unique to the Modified layout.
 _MODIFIED_SIGNATURE = {"Total Ticket Start", "Total Ticket End", "PO #"}
 
+# Accounting-team usernames whose PO cost-change lines are typically already
+# entered in QBO. The Zone 1 "Converted" sheet highlights the User column for
+# these so reviewers can flag them (Remove = X) before Zone 2 processing.
+#
+# IMPORTANT: keep this in sync with the list shown to users in
+# templates/index.html (#upload-screen-warning). Stored lowercased for
+# case-insensitive matching. Note that "macohen" is intentional and distinct
+# from "mcohen" (which is NOT an accounting user — see the "(not mcohen)" note
+# in the UI), so matching is exact rather than substring.
+ACCOUNTING_USERS: frozenset[str] = frozenset({
+    "jhantz", "jhantz-2", "jhantz-3", "bblumenthal", "yklein", "awealcatch",
+    "cschlesinger", "dbowden", "macohen", "gbollag", "mtawil", "sgreenhouse",
+    "msadriu", "lrafuna", "fajeti", "mmeta", "lbeqa", "fhoxha", "hmorina",
+})
+
+# Highlight applied to the User column for accounting-team users (Zone 1).
+ACCOUNTING_FILL = PatternFill("solid", start_color="FFEB3B")  # amber-yellow
+
+
+def _is_accounting_user(value) -> bool:
+    """True when `value` is a known accounting-team username (case-insensitive,
+    exact match — so 'mcohen' does not match 'macohen')."""
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return False
+    return str(value).strip().lower() in ACCOUNTING_USERS
+
 
 def _is_modified_format(df: pd.DataFrame) -> bool:
     return _MODIFIED_SIGNATURE.issubset(set(df.columns))
@@ -940,8 +966,9 @@ def _write_sheet(wb, sheet_name: str, df: pd.DataFrame) -> None:
         ws.column_dimensions[get_column_letter(ci)].width = min(max_len + 2, 55)
 
     ws.freeze_panes = "A2"
-    if len(df) > 0:
-        ws.auto_filter.ref = ws.dimensions
+    # Filter dropdowns on the header row of every sheet (whole used range, or
+    # just the header when there are no data rows).
+    ws.auto_filter.ref = ws.dimensions
 
 
 def _created_paren(row) -> str:
@@ -1781,6 +1808,16 @@ def convert_to_modified(file_bytes: bytes, filename: str) -> bytes:
         for raw_col, mod_col in RAW_TO_MODIFIED:
             out[mod_col] = raw[raw_col] if raw_col in raw.columns else pd.NA
 
+    # Cancelled: show the pipeline's Yes/blank convention instead of the raw
+    # True/False from the export (all output files use Yes/blank). Non-cancelled
+    # rows become truly-empty cells so the column filters cleanly. Round-trips
+    # back through Zone 2 unchanged (_to_cancelled maps "Yes"/blank correctly).
+    if "Cancelled" in out.columns:
+        out["Cancelled"] = [
+            "Yes" if _to_cancelled(v) == "Yes" else None
+            for v in out["Cancelled"]
+        ]
+
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "Converted"
@@ -1793,28 +1830,40 @@ def convert_to_modified(file_bytes: bytes, filename: str) -> bytes:
 
 def _write_modified_sheet(ws, df: pd.DataFrame) -> None:
     """Write the Modified review sheet: header band + values exactly as read
-    (NaN/NaT → blank). Light styling, frozen header, autosized columns."""
+    (NaN/NaT → blank). Light styling, frozen header, autosized columns, an
+    auto-filter on the header row, and a yellow highlight on the User column for
+    rows whose user is a known accounting-team user (see ACCOUNTING_USERS)."""
     from openpyxl.styles import Font, PatternFill, Alignment
 
     header_font = Font(bold=True, color="FFFFFF", size=10)
     header_fill = PatternFill("solid", start_color="3F51B5")
-    for ci, col in enumerate(df.columns, 1):
+    cols = list(df.columns)
+    for ci, col in enumerate(cols, 1):
         cell = ws.cell(row=1, column=ci, value=col)
         cell.font = header_font
         cell.fill = header_fill
         cell.alignment = Alignment(horizontal="left")
 
+    user_ci = cols.index("User") + 1 if "User" in cols else None
+
     for ri, (_, row) in enumerate(df.iterrows(), 2):
-        for ci, col in enumerate(df.columns, 1):
+        for ci, col in enumerate(cols, 1):
             v = row[col]
             if v is None or (not isinstance(v, (list, tuple)) and pd.isna(v)):
                 v = None
             elif isinstance(v, (pd.Timestamp,)):
                 v = v.to_pydatetime()
-            ws.cell(row=ri, column=ci, value=v)
+            cell = ws.cell(row=ri, column=ci, value=v)
+            # Flag accounting-team users so reviewers can mark Remove = X.
+            if ci == user_ci and _is_accounting_user(v):
+                cell.fill = ACCOUNTING_FILL
 
     ws.freeze_panes = "A2"
-    for ci, col in enumerate(df.columns, 1):
+    for ci, col in enumerate(cols, 1):
         width = max(len(str(col)) + 2, 12)
         ws.column_dimensions[openpyxl.utils.get_column_letter(ci)].width = min(width, 40)
+
+    # Filter dropdowns on the header row (whole used range, or just the header
+    # when there are no data rows).
+    ws.auto_filter.ref = ws.dimensions
 

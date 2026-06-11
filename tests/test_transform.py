@@ -869,3 +869,81 @@ def test_zone1_modified_is_pure_reformat_no_aggregation():
     start = ws.cell(row=2, column=hdr.index("Total Ticket Start") + 1).value
     end = ws.cell(row=2, column=hdr.index("Total Ticket End") + 1).value
     assert start == 50 and end == 20
+
+
+# ---------------------------------------------------------------------------
+# Zone 1 Converted: accounting-user highlight, header filters, Cancelled
+# rendered as Yes/blank (not True/False).
+# ---------------------------------------------------------------------------
+
+def _converted_ws(rows, filename="PO_Cost_Changes_2026-05-30.xlsx"):
+    import openpyxl
+    b = processor.convert_to_modified(_to_xlsx_bytes(rows), filename)
+    return openpyxl.load_workbook(io.BytesIO(b))["Converted"]
+
+
+def _fill_rgb(cell):
+    return cell.fill.fgColor.rgb if cell.fill and cell.fill.patternType else None
+
+
+def test_zone1_highlights_accounting_users_only():
+    ws = _converted_ws([
+        _row(PurchaseOrderID=1, UpdateUser="jhantz-2"),   # accounting
+        _row(PurchaseOrderID=2, UpdateUser="mcohen"),     # look-alike, NOT accounting
+        _row(PurchaseOrderID=3, UpdateUser="MaCohen"),    # accounting (case-insensitive)
+        _row(PurchaseOrderID=4, UpdateUser="randomuser"), # not accounting
+    ])
+    hdr = [c.value for c in ws[1]]
+    ui = hdr.index("User") + 1
+    fills = {ws.cell(r, ui).value: _fill_rgb(ws.cell(r, ui)) for r in range(2, ws.max_row + 1)}
+    yellow = processor.ACCOUNTING_FILL.fgColor.rgb
+    assert fills["jhantz-2"] == yellow
+    assert fills["MaCohen"] == yellow
+    assert fills["mcohen"] is None      # must not match macohen
+    assert fills["randomuser"] is None
+
+
+def test_zone1_converted_has_header_filter():
+    ws = _converted_ws([_row(PurchaseOrderID=1)])
+    assert ws.auto_filter.ref is not None
+    assert ws.auto_filter.ref.startswith("A1")
+
+
+def test_zone1_cancelled_is_yes_blank_not_boolean():
+    ws = _converted_ws([
+        _row(PurchaseOrderID=1, IsCancelled=True),
+        _row(PurchaseOrderID=2, IsCancelled=False),
+    ])
+    hdr = [c.value for c in ws[1]]
+    ci = hdr.index("Cancelled") + 1
+    assert ws.cell(2, ci).value == "Yes"
+    assert ws.cell(3, ci).value in (None, "")   # blank, not False
+
+
+def test_zone2_empty_sheet_still_has_header_filter():
+    # Every data sheet in the combined workbook carries a header-row filter,
+    # including empty per-company tabs.
+    import openpyxl
+    rows = [_row(PurchaseOrderID=1, CompanyName="YSA",
+                 InitialTicketCostTotal=0, TicketCostTotal=100)]
+    out = processor.process_files([(_to_xlsx_bytes(rows), "PO_Cost_Changes_2026-05-30.xlsx")])
+    res = processor.build_filtered_outputs(
+        out["_cleaned"], out["_source_view"], out["_excluded_view"],
+        out["date_range"], out["all_companies"],
+    )
+    wb = openpyxl.load_workbook(io.BytesIO(res["combined"]))
+    for name in wb.sheetnames:
+        if name == "Summary":
+            continue   # grouped pivot layout — intentionally unfiltered
+        assert wb[name].auto_filter.ref is not None, f"{name} missing filter"
+
+
+def test_accounting_users_match_ui_list():
+    # Guard against drift between the code constant and the UI reminder list.
+    import re
+    here = os.path.dirname(__file__)
+    html = open(os.path.join(here, "..", "index.html")).read()
+    block = re.search(r'upload-warning-users"?>(.*?)</div>', html, re.S).group(1)
+    ui_names = {re.sub(r"\(.*?\)", "", s).strip().lower()
+                for s in re.findall(r"<span>(.*?)</span>", block)}
+    assert ui_names == set(processor.ACCOUNTING_USERS)
