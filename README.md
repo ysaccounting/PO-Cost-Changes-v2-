@@ -203,10 +203,20 @@ least one positive adjustment. Columns:
 - **Seasons** — left blank for manual entry.
 
 Only positive adjustments (the Bills-tab items) appear here; negatives remain
-in the Expenses output. These files download individually from the UI and are
-bundled under a `Bills/` folder in the "Download All" zip. The combined
-workbook's **Bills tab uses this same PD layout**, and the per-company files'
-row counts and totals tie out exactly to it.
+in the Expenses output. These files download individually from the UI. In the
+"Download All" zip, per-company **Expenses** files are bundled under an
+`Expenses/` folder and per-company **Bills** files under a `Bills/` folder,
+while the **Combined** workbook sits at the top level (in neither folder). The
+combined workbook's **Bills tab uses this same PD layout**, and the per-company
+files' row counts and totals tie out exactly to it.
+
+### Download filenames
+
+- Combined: `PO Cost Changes - Combined (<companies>) - <date>.xlsx`, where
+  `<companies>` lists every company present in that workbook (selection-
+  dependent, in the order picked).
+- Per-company Expenses: `PO Cost Changes - Expenses - <Company> - <date>.xlsx`.
+- Per-company Bills: `PO Cost Changes - Bills - <Company> - <date>.xlsx`.
 
 ## Vendor renaming (`vendor_rules.py`)
 

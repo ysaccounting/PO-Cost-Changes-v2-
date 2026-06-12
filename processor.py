@@ -1199,11 +1199,12 @@ def _write_summary_sheet(wb, combined_ledger: pd.DataFrame) -> None:
         df.groupby(["Company", "Vendor", "Description", "Date"], dropna=False, as_index=False)
         ["Total"].sum()
     )
-    # Sort: company by the same DISPLAY_ORDER used everywhere else; everything
-    # else alphabetically/chronologically.
+    # Sort: company by the same DISPLAY_ORDER used everywhere else; within each
+    # company, chronologically by Date, then Vendor (then Description as a stable
+    # tiebreaker).
     grouped["_co_order"] = grouped["Company"].map(_sort_key)
     grouped = grouped.sort_values(
-        ["_co_order", "Vendor", "Description", "Date"], kind="mergesort"
+        ["_co_order", "Date", "Vendor", "Description"], kind="mergesort"
     ).drop(columns=["_co_order"]).reset_index(drop=True)
 
     # ── Title + header row ──────────────────────────────────────────────────

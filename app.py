@@ -266,6 +266,25 @@ def configure(job_id):
     })
 
 
+def _combined_company_suffix(meta: dict) -> str:
+    """Comma-separated list of the companies actually present in the combined
+    workbook (those with at least one expense or bill), in the order the user
+    selected them. Empty string when none are present."""
+    present = set(meta.get("companies", [])) | set(meta.get("bills_companies", []))
+    ordered = [c for c in meta.get("selected_companies", []) if c in present]
+    for c in sorted(present):            # defensive: any present-but-unselected
+        if c not in ordered:
+            ordered.append(c)
+    return ", ".join(c.replace("/", "_").replace("\\", "_") for c in ordered)
+
+
+def _combined_download_name(meta: dict) -> str:
+    """Combined workbook filename, listing the companies it contains."""
+    suffix = _combined_company_suffix(meta)
+    label = f"Combined ({suffix})" if suffix else "Combined"
+    return f"PO Cost Changes - {label} - {meta['date_range']}.xlsx"
+
+
 @app.route("/download/<job_id>/combined")
 def download_combined(job_id):
     meta = read_meta(job_id)
@@ -276,7 +295,7 @@ def download_combined(job_id):
         return jsonify({"error": "File not found"}), 404
     return send_file(
         path, as_attachment=True,
-        download_name=f"PO Cost Changes - Combined - {meta['date_range']}.xlsx",
+        download_name=_combined_download_name(meta),
         mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
 
@@ -292,7 +311,7 @@ def download_company(job_id, company):
         return jsonify({"error": "File not found"}), 404
     return send_file(
         path, as_attachment=True,
-        download_name=f"PO Cost Changes - {company} - {meta['date_range']}.xlsx",
+        download_name=f"PO Cost Changes - Expenses - {company} - {meta['date_range']}.xlsx",
         mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
 
@@ -324,12 +343,13 @@ def download_all_zip(job_id):
     with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
         combined = os.path.join(d, "combined.xlsx")
         if os.path.exists(combined):
-            zf.write(combined, f"PO Cost Changes - Combined - {dr}.xlsx")
+            # Combined stays at the top level (not inside Expenses/ or Bills/).
+            zf.write(combined, _combined_download_name(meta))
         for company in meta["companies"]:
             safe = company.replace("/", "_").replace("\\", "_")
             cp = os.path.join(d, "companies", f"{safe}.xlsx")
             if os.path.exists(cp):
-                zf.write(cp, f"PO Cost Changes - {company} - {dr}.xlsx")
+                zf.write(cp, f"Expenses/PO Cost Changes - Expenses - {company} - {dr}.xlsx")
         for company in meta.get("bills_companies", []):
             safe = company.replace("/", "_").replace("\\", "_")
             bp = os.path.join(d, "bills", f"{safe}.xlsx")

@@ -971,3 +971,48 @@ def test_zone2_highlights_accounting_users_in_source_data():
     fills = {ws.cell(r, ui).value: _fill_rgb(ws.cell(r, ui)) for r in range(2, ws.max_row + 1)}
     assert fills["bblumenthal"] == yellow
     assert fills["someoneelse"] != yellow
+
+
+# ---------------------------------------------------------------------------
+# Summary sort order + download filename / zip-folder tweaks.
+# ---------------------------------------------------------------------------
+
+def test_summary_sorted_by_date_then_vendor():
+    import openpyxl, datetime as dt
+    ledger = pd.DataFrame([
+        {"Company": "YSA", "Vendor": "Zzz", "Description": "d1",
+         "Date": dt.datetime(2026, 6, 1), "Total": -10.0},
+        {"Company": "YSA", "Vendor": "Aaa", "Description": "d2",
+         "Date": dt.datetime(2026, 6, 5), "Total": -20.0},
+        {"Company": "YSA", "Vendor": "Bbb", "Description": "d3",
+         "Date": dt.datetime(2026, 6, 1), "Total": -30.0},
+    ])
+    wb = openpyxl.Workbook(); wb.remove(wb.active)
+    processor._write_summary_sheet(wb, ledger)
+    ws = wb["Summary"]
+    seen, r = [], 3
+    while ws.cell(r, 1).value != "YSA Total":
+        seen.append((ws.cell(r, 4).value, ws.cell(r, 2).value))
+        r += 1
+    assert seen == [
+        (dt.datetime(2026, 6, 1), "Bbb"),   # earliest date, vendor B before Z
+        (dt.datetime(2026, 6, 1), "Zzz"),
+        (dt.datetime(2026, 6, 5), "Aaa"),   # later date last
+    ]
+
+
+def test_combined_download_name_lists_companies():
+    import app as appmod
+    meta = {
+        "date_range": "June 9th 2026",
+        "selected_companies": ["GK", "YSA", "TL"],
+        "companies": ["GK", "YSA"],      # have expenses
+        "bills_companies": ["TL"],       # has bills only
+    }
+    name = appmod._combined_download_name(meta)
+    assert name == "PO Cost Changes - Combined (GK, YSA, TL) - June 9th 2026.xlsx"
+
+    # No companies present → plain "Combined".
+    empty = {"date_range": "June 9th 2026", "selected_companies": [],
+             "companies": [], "bills_companies": []}
+    assert appmod._combined_download_name(empty) == "PO Cost Changes - Combined - June 9th 2026.xlsx"
