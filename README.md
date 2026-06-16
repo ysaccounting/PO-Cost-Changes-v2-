@@ -67,8 +67,12 @@ gunicorn app:app --workers 1 --worker-class gthread --threads 4 --timeout 120
 and returns a single-sheet **Converted** workbook: the same seat-level rows with
 columns renamed/reordered into a friendly review layout (cost/qty fields split
 into Start = initial and End = current; five internal ID/match columns dropped).
-Values are preserved exactly — no aggregation, no date conversion. The user can
-review/edit it and feed it into Zone 2, which reads the Converted layout
+Values are preserved exactly — no aggregation, and no timezone conversion. The
+date columns (Adjustment Date, Event Date, CreatedDate) are shown **date-only
+(no timestamp)** for easier review, but the underlying instant is kept intact
+(naive UTC wall-clock), so re-uploading the Converted file into Zone 2 still
+converts UTC → Central and applies the same-day exclusion identically. The user
+can review/edit it and feed it into Zone 2, which reads the Converted layout
 natively. Zone 1 → Zone 2 is identical to uploading the raw file into Zone 2.
 
 **Zone 2 — process (required).**
@@ -167,13 +171,19 @@ The reconciliation invariant holds across the split:
 
 Each company has two names, mirroring the Purchase Details app:
 
-- a **short sheet/file/UI label** (e.g. `GK`, `Ticket Guy`, `Chase`, `Waxler`), and
+- a **short sheet/file/UI label** (e.g. `GK`, `Ticket Guy`, `Chase`, `Waxler`,
+  `Asher`), and
 - the **Company-column value** written into the data (e.g. `YSKG`, `Ticket Guy`,
-  `Chase (Jacks)`, `YSW (Waxler)`).
+  `Chase (Jacks)`, `YSW (Waxler)`, `YSA`).
 
-Only these four companies are renamed in-data; every other company keeps its
-raw TicketVault name in the Company column (e.g. `YS-Seatgeek2`). The short
-labels are defined in `FILE_LABELS`, the Company-value renames in
+The label is what appears on the per-company tab in the combined workbook, the
+download file names, and the company checkbox list; the Company-column value is
+what appears in the data, the memos (`… Cost Changes (<value>)`), and the
+Summary group headers. For most companies the two are identical. They differ
+for `YSKG`→`GK`, `Chase (Jacks)`→`Chase`, `YSW (Waxler)`→`Waxler`, and
+`YSA`→`Asher` (i.e. the YSA company shows as **Asher** on tabs/files/checkboxes
+while its Company value, memos, and `YSA Total` Summary line stay `YSA`). The
+short labels are defined in `FILE_LABELS`, the Company-value renames in
 `COMPANY_VALUE_RENAMES`, and the QBO→Company-value map in `DISPLAY_NAMES`.
 
 The downloadable **individual company files lead with their data sheet

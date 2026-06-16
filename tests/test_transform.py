@@ -428,7 +428,7 @@ def test_pd_bills_per_company_files_tie_to_bills_tab():
         res["date_range"], res["all_companies"],
     )
     # One bills file per company with positive adjustments.
-    assert set(out["bills_files"].keys()) == {"YSA", "Katz"}
+    assert set(out["bills_files"].keys()) == {"Asher", "Katz"}
 
 
 def test_build_filtered_outputs_respects_selection():
@@ -442,9 +442,9 @@ def test_build_filtered_outputs_respects_selection():
     # Select only YSA → only YSA's bills file is produced.
     out = processor.build_filtered_outputs(
         res["_cleaned"], res["_source_view"], res["_excluded_view"],
-        res["date_range"], ["YSA"],
+        res["date_range"], ["Asher"],
     )
-    assert set(out["bills_files"].keys()) == {"YSA"}
+    assert set(out["bills_files"].keys()) == {"Asher"}
     assert out["combined"]
 
 
@@ -554,7 +554,7 @@ def test_company_files_have_company_scoped_tabs():
         res["date_range"], res["all_companies"],
     )
     import openpyxl, io as _io
-    for label, raw_company in [("GK", "GK LLC"), ("YSA", "YSA")]:
+    for label, raw_company in [("GK", "GK LLC"), ("Asher", "YSA")]:
         wb = openpyxl.load_workbook(_io.BytesIO(out["companies"][label]))
         assert wb.sheetnames == ["Expenses", "Summary", "Source Data", "Excluded"]
         sd = wb["Source Data"]
@@ -1016,3 +1016,72 @@ def test_combined_download_name_lists_companies():
     empty = {"date_range": "June 9th 2026", "selected_companies": [],
              "companies": [], "bills_companies": []}
     assert appmod._combined_download_name(empty) == "PO Cost Changes - Combined - June 9th 2026.xlsx"
+
+
+# ---------------------------------------------------------------------------
+# Zone 1 Converted: date fields render date-only (no timestamp) while the
+# underlying datetime is preserved for the Zone 2 round-trip.
+# ---------------------------------------------------------------------------
+
+def test_zone1_date_columns_are_date_only_display():
+    import openpyxl, datetime as dt
+    rows = [_row(PurchaseOrderID=1,
+                 AdjustedDateTimeUTC="2026-06-01T04:51:00",
+                 CreatedDate="2026-05-15T22:10:00",
+                 EventDate="2026-07-04T19:30:00")]
+    b = processor.convert_to_modified(_to_xlsx_bytes(rows), "PO_Cost_Changes.xlsx")
+    ws = openpyxl.load_workbook(io.BytesIO(b))["Converted"]
+    hdr = [c.value for c in ws[1]]
+    for name in ("Adjustment Date", "Event Date", "CreatedDate"):
+        cell = ws.cell(2, hdr.index(name) + 1)
+        assert cell.number_format == "mm/dd/yyyy", name        # displays date-only
+        assert isinstance(cell.value, dt.datetime), name        # real datetime kept
+    # Time component is preserved underneath (needed by Zone 2).
+    adj = ws.cell(2, hdr.index("Adjustment Date") + 1).value
+    assert (adj.hour, adj.minute) == (4, 51)
+
+
+def test_zone1_date_only_preserves_same_day_exclusion_roundtrip():
+    # A row whose PO was created the same US-Central day as the adjustment is
+    # excluded. The Converted file must reproduce that exclusion exactly, which
+    # only holds if the underlying timestamp survives the date-only formatting.
+    rows = [_row(PurchaseOrderID=1, CompanyName="YSA",
+                 InitialTicketCostTotal=0, TicketCostTotal=100,
+                 AdjustedDateTimeUTC="2026-06-10T15:00:00",
+                 CreatedDate="2026-06-10T09:00:00", Remove="")]
+    raw_bytes = _to_xlsx_bytes(rows, extra_cols=["Remove"])
+    conv = processor.convert_to_modified(raw_bytes, "PO_Cost_Changes_2026-06-10.xlsx")
+    raw = processor.process_files([(raw_bytes, "PO_Cost_Changes_2026-06-10.xlsx")])
+    mod = processor.process_files([(conv, "x (converted).xlsx")])
+    assert raw["excluded"]["row_count"] == 1            # excluded same-day in raw
+    assert mod["excluded"] == raw["excluded"]           # ...and identically via Converted
+
+
+def test_ysa_label_is_asher_value_preserved():
+    # YSA's tab/file/checkbox label is "Asher"; the Company-column value,
+    # the memo text, and the Summary header all stay "YSA".
+    assert processor.file_label("YSA") == "Asher"
+    assert "Asher" in processor.DISPLAY_ORDER and "YSA" not in processor.DISPLAY_ORDER
+
+    rows = [_row(PurchaseOrderID=1, CompanyName="YSA", PerformerName="Hamilton",
+                 AccountEmail="a@b.com", InitialTicketCostTotal=0, TicketCostTotal=100)]
+    res = processor.process_files([(_to_xlsx_bytes(rows), "f.xlsx")])
+    # Checkbox list (all_companies) shows the label.
+    assert "Asher" in res["all_companies"] and "YSA" not in res["all_companies"]
+
+    out = processor.build_filtered_outputs(
+        res["_cleaned"], res["_source_view"], res["_excluded_view"],
+        res["date_range"], res["all_companies"],
+    )
+    # File keys (download names) use the label.
+    assert set(out["bills_files"].keys()) == {"Asher"}
+
+    import openpyxl, io as _io
+    wb = openpyxl.load_workbook(_io.BytesIO(out["combined"]))
+    # Combined per-company tab uses the label...
+    assert "Asher" in wb.sheetnames and "YSA" not in wb.sheetnames
+    # ...but the data value / memo stays "YSA".
+    sd = wb["Source Data"]; ci = [c.value for c in sd[1]].index("Company")
+    assert {r[ci] for r in sd.iter_rows(min_row=2, values_only=True) if r[ci]} == {"YSA"}
+    bills = wb["Bills"]; mi = [c.value for c in bills[1]].index("Memo")
+    assert "Cost Changes (YSA)" in bills.cell(2, mi + 1).value

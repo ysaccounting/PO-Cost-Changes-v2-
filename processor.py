@@ -62,6 +62,7 @@ FILE_LABELS: dict[str, str] = {
     "YSKG":          "GK",
     "Chase (Jacks)": "Chase",
     "YSW (Waxler)":  "Waxler",
+    "YSA":           "Asher",   # tab/file/UI label only; Company value stays "YSA"
     # "Ticket Guy" — sheet label and Company value are the same.
 }
 
@@ -106,7 +107,7 @@ DISPLAY_ORDER: list[str] = [
     "GK",
     "Ticket Guy",
     "Chase",
-    "YSA",
+    "Asher",       # YSA's display label (Company value remains "YSA")
     "Katz",
     "Needle",      # not in reference; slotted with the other affiliates
     "TL",
@@ -534,6 +535,11 @@ MODIFIED_TO_RAW = {m: r for r, m in RAW_TO_MODIFIED}
 MODIFIED_TO_RAW["Team/Performer"] = "PerformerName"
 # Signature columns unique to the Modified layout.
 _MODIFIED_SIGNATURE = {"Total Ticket Start", "Total Ticket End", "PO #"}
+
+# Date columns in the Modified (Zone 1) layout. Shown date-only (no timestamp)
+# in the Converted output, while the full underlying datetime value is preserved
+# so a re-uploaded Converted file still processes identically in Zone 2.
+_MODIFIED_DATE_COLS = {"Adjustment Date", "Event Date", "CreatedDate"}
 
 # Accounting-team usernames whose PO cost-change lines are typically already
 # entered in QBO. The Zone 1 "Converted" sheet highlights the User column for
@@ -1825,6 +1831,18 @@ def convert_to_modified(file_bytes: bytes, filename: str) -> bytes:
             for v in out["Cancelled"]
         ]
 
+    # Date fields: parse to real datetimes so the Converted sheet can show them
+    # date-only (no timestamp) via a number format, regardless of whether the
+    # export delivered them as text or as Excel datetimes. The instant is
+    # preserved (naive UTC wall-clock — what Zone 2 expects), so a re-uploaded
+    # Converted file processes identically (UTC→Central + same-day exclusion).
+    for dcol in _MODIFIED_DATE_COLS:
+        if dcol in out.columns:
+            parsed = pd.to_datetime(out[dcol], errors="coerce")
+            if getattr(parsed.dtype, "tz", None) is not None:
+                parsed = parsed.dt.tz_localize(None)
+            out[dcol] = parsed
+
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "Converted"
@@ -1852,6 +1870,7 @@ def _write_modified_sheet(ws, df: pd.DataFrame) -> None:
         cell.alignment = Alignment(horizontal="left")
 
     user_ci = cols.index("User") + 1 if "User" in cols else None
+    date_cis = {cols.index(c) + 1 for c in _MODIFIED_DATE_COLS if c in cols}
 
     for ri, (_, row) in enumerate(df.iterrows(), 2):
         for ci, col in enumerate(cols, 1):
@@ -1861,6 +1880,11 @@ def _write_modified_sheet(ws, df: pd.DataFrame) -> None:
             elif isinstance(v, (pd.Timestamp,)):
                 v = v.to_pydatetime()
             cell = ws.cell(row=ri, column=ci, value=v)
+            # Date fields display as date-only (no timestamp). The underlying
+            # datetime is preserved so a re-uploaded Converted file still
+            # processes identically in Zone 2 (UTC→Central + same-day exclusion).
+            if ci in date_cis and isinstance(v, _date):
+                cell.number_format = "mm/dd/yyyy"
             # Flag accounting-team users so reviewers can mark Remove = X.
             if ci == user_ci and _is_accounting_user(v):
                 cell.fill = ACCOUNTING_FILL
