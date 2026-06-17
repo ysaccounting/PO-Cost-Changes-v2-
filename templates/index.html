@@ -381,11 +381,16 @@
       font-size: 13px; color: #c0392b; font-weight: 600;
     }
     #remove-warn-files li { margin: 2px 0; word-break: break-all; }
-    #remove-warn-ok {
+    #remove-warn-back, #remove-warn-proceed {
       padding: 9px 22px; font-size: 13px; font-weight: 600; border-radius: 10px;
-      background: #3f51b5; color: #fff; border: none; cursor: pointer;
+      cursor: pointer;
     }
-    #remove-warn-ok:hover { background: #303f9f; }
+    /* Go Back is the recommended (primary) action; Proceed Anyway is the
+       cautionary (secondary) one. */
+    #remove-warn-back { background: #2e7d32; color: #fff; border: none; }
+    #remove-warn-back:hover { background: #1b5e20; }
+    #remove-warn-proceed { background: #fff; color: #c0392b; border: 1px solid #c0392b; }
+    #remove-warn-proceed:hover { background: #fdecea; }
     /* Zone 1 — convert (optional) */
     .zone-divider { height: 1px; background: #eee; margin: 28px 0 0; }
     #convert-drop-zone {
@@ -585,11 +590,12 @@
 <div id="remove-warn-overlay">
   <div id="remove-warn-box">
     <h2>“Remove” column missing</h2>
-    <p>Processing is blocked. The required <strong>Remove</strong> column wasn’t found in:</p>
+    <p>A <strong>Remove</strong> column wasn’t found in:</p>
     <ul id="remove-warn-files"></ul>
-    <p>Add a <strong>Remove</strong> column (put an <strong>X</strong> on each accounting-team cost-change line already entered in QBO) to each file listed above, then try again.</p>
+    <p>Go back to add a <strong>Remove</strong> column (put an <strong>X</strong> on each accounting-team cost-change line already entered in QBO), or proceed anyway to process every row as-is.</p>
     <div class="modal-actions">
-      <button id="remove-warn-ok">OK</button>
+      <button id="remove-warn-back">Go Back</button>
+      <button id="remove-warn-proceed">Proceed Anyway</button>
     </div>
   </div>
 </div>
@@ -812,14 +818,16 @@
     resetBtn.style.display = "block";
   }
 
-  async function startProcessing() {
+  async function startProcessing(force = false) {
     if (ccFiles.length === 0) return;
     errorBox.style.display = "none";
 
     // Upload + validate first; stay on the upload screen until we know every
-    // file has a Remove column. A missing column hard-blocks here.
+    // file has a Remove column. A missing column shows a dialog where the user
+    // can go back and add it, or proceed anyway (re-runs this with force=true).
     const formData = new FormData();
     ccFiles.forEach(f => formData.append("file", f));
+    if (force) formData.append("force", "true");
 
     let res, data;
     try {
@@ -882,8 +890,12 @@
     });
     document.getElementById("remove-warn-overlay").classList.add("active");
   }
-  document.getElementById("remove-warn-ok").addEventListener("click", () => {
+  document.getElementById("remove-warn-back").addEventListener("click", () => {
     document.getElementById("remove-warn-overlay").classList.remove("active");
+  });
+  document.getElementById("remove-warn-proceed").addEventListener("click", () => {
+    document.getElementById("remove-warn-overlay").classList.remove("active");
+    startProcessing(true);   // re-run, bypassing the Remove-column check
   });
 
   function showModal(jobId, data) {

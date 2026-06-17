@@ -160,14 +160,18 @@ def upload():
         return jsonify({"error": "No PO Cost Changes files provided"}), 400
     file_list = [(f.read(), f.filename) for f in files if f.filename]
 
-    # Hard block: every uploaded file must contain a "Remove" column. Processing
-    # does not start until the user adds it to the file(s) listed below.
-    missing = files_missing_remove_column(file_list)
-    if missing:
-        return jsonify({
-            "error": "remove_column_missing",
-            "missing_remove": missing,
-        }), 400
+    # Soft block: every uploaded file should contain a "Remove" column. If any
+    # are missing it, return the list so the UI can show a dialog. The user can
+    # go back and add it, or proceed anyway — which re-submits with force=true
+    # and skips this check (every row is then processed as-is).
+    force = request.form.get("force", "").strip().lower() in ("1", "true", "yes")
+    if not force:
+        missing = files_missing_remove_column(file_list)
+        if missing:
+            return jsonify({
+                "error": "remove_column_missing",
+                "missing_remove": missing,
+            }), 400
 
     job_id = str(uuid.uuid4())
     write_job_status(job_id, "processing")
