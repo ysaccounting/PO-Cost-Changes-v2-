@@ -59,6 +59,22 @@ def read_meta(job_id: str) -> dict | None:
         return json.load(f)
 
 
+def write_configure_status(job_id: str, payload: dict) -> None:
+    """Progress/result for the file-generation (configure) step."""
+    d = job_dir(job_id)
+    os.makedirs(d, exist_ok=True)
+    with open(os.path.join(d, "configure.json"), "w") as f:
+        json.dump(payload, f)
+
+
+def read_configure_status(job_id: str) -> dict | None:
+    path = os.path.join(job_dir(job_id), "configure.json")
+    if not os.path.exists(path):
+        return None
+    with open(path) as f:
+        return json.load(f)
+
+
 def run_job(job_id: str, file_list: list[tuple[bytes, str]]) -> None:
     """Background worker — process the upload, then pickle the intermediate
     data so build_filtered_outputs() can build the chosen companies' files
@@ -204,89 +220,99 @@ def status(job_id):
     })
 
 
+def run_configure(job_id: str, selected: list[str]) -> None:
+    """Background worker: build the selected companies' output files, reporting
+    per-file progress to configure.json, then record which are downloadable."""
+    try:
+        write_configure_status(job_id, {"status": "generating", "done": 0, "total": 0})
+        meta = read_meta(job_id)
+        d = job_dir(job_id)
+        with open(os.path.join(d, "data.pkl"), "rb") as f:
+            dfs = pickle.load(f)
+
+        def progress(done: int, total: int) -> None:
+            write_configure_status(job_id, {"status": "generating", "done": done, "total": total})
+
+        out = build_filtered_outputs(
+            dfs["cleaned"], dfs["source_view"], dfs["excluded_view"],
+            dfs["date_range"], selected, progress_cb=progress,
+        )
+
+        with open(os.path.join(d, "combined.xlsx"), "wb") as f:
+            f.write(out["combined"])
+
+        # (Re)write per-company expenses files, clearing any previous selection.
+        companies_dir = os.path.join(d, "companies")
+        os.makedirs(companies_dir, exist_ok=True)
+        for fn in os.listdir(companies_dir):
+            os.remove(os.path.join(companies_dir, fn))
+        for company, file_bytes in out["companies"].items():
+            safe = company.replace("/", "_").replace("\\", "_")
+            with open(os.path.join(companies_dir, f"{safe}.xlsx"), "wb") as f:
+                f.write(file_bytes)
+
+        # (Re)write per-company bills files.
+        bills_dir = os.path.join(d, "bills")
+        os.makedirs(bills_dir, exist_ok=True)
+        for fn in os.listdir(bills_dir):
+            os.remove(os.path.join(bills_dir, fn))
+        for company, file_bytes in out["bills_files"].items():
+            safe = company.replace("/", "_").replace("\\", "_")
+            with open(os.path.join(bills_dir, f"{safe}.xlsx"), "wb") as f:
+                f.write(file_bytes)
+
+        meta["selected_companies"] = selected
+        meta["companies"] = list(out["companies"].keys())
+        meta["bills_companies"] = list(out["bills_files"].keys())
+        with open(os.path.join(d, "meta.json"), "w") as f:
+            json.dump(meta, f)
+
+        total = 1 + len(meta["companies"]) + len(meta["bills_companies"])
+        write_configure_status(job_id, {
+            "status": "ready",
+            "done": total,
+            "total": total,
+            "date_range": meta["date_range"],
+            "selected_companies": selected,
+            "companies": meta["companies"],
+            "bills_companies": meta["bills_companies"],
+            "stats": meta.get("stats", {}),
+        })
+        log.info("Configure %s ready (%d files)", job_id, total)
+    except Exception as e:
+        log.exception("Configure %s failed", job_id)
+        write_configure_status(job_id, {"status": "error", "message": str(e)})
+
+
 @app.route("/configure/<job_id>", methods=["POST"])
 def configure(job_id):
-    """Build the output files for the user's selected companies, write them to
-    disk, and record which ones are available for download."""
+    """Kick off building the output files for the user's selected companies in a
+    background thread. The UI polls /configure_status for per-file progress."""
     meta = read_meta(job_id)
     if not meta:
         return jsonify({"error": "Job not found"}), 404
+    if not os.path.exists(os.path.join(job_dir(job_id), "data.pkl")):
+        return jsonify({"error": "Job data not found"}), 404
 
     data = request.get_json(silent=True) or {}
     selected = data.get("selected_companies", meta.get("all_companies", []))
 
-    pkl_path = os.path.join(job_dir(job_id), "data.pkl")
-    if not os.path.exists(pkl_path):
-        return jsonify({"error": "Job data not found"}), 404
-    with open(pkl_path, "rb") as f:
-        dfs = pickle.load(f)
-
-    try:
-        out = build_filtered_outputs(
-            dfs["cleaned"], dfs["source_view"], dfs["excluded_view"],
-            dfs["date_range"], selected,
-        )
-    except Exception as e:
-        log.exception("Configure %s failed", job_id)
-        return jsonify({"status": "error", "message": str(e)}), 500
-
-    d = job_dir(job_id)
-    with open(os.path.join(d, "combined.xlsx"), "wb") as f:
-        f.write(out["combined"])
-
-    # (Re)write per-company expenses files, clearing any previous selection.
-    companies_dir = os.path.join(d, "companies")
-    os.makedirs(companies_dir, exist_ok=True)
-    for fn in os.listdir(companies_dir):
-        os.remove(os.path.join(companies_dir, fn))
-    for company, file_bytes in out["companies"].items():
-        safe = company.replace("/", "_").replace("\\", "_")
-        with open(os.path.join(companies_dir, f"{safe}.xlsx"), "wb") as f:
-            f.write(file_bytes)
-
-    # (Re)write per-company bills files.
-    bills_dir = os.path.join(d, "bills")
-    os.makedirs(bills_dir, exist_ok=True)
-    for fn in os.listdir(bills_dir):
-        os.remove(os.path.join(bills_dir, fn))
-    for company, file_bytes in out["bills_files"].items():
-        safe = company.replace("/", "_").replace("\\", "_")
-        with open(os.path.join(bills_dir, f"{safe}.xlsx"), "wb") as f:
-            f.write(file_bytes)
-
-    meta["selected_companies"] = selected
-    meta["companies"] = list(out["companies"].keys())
-    meta["bills_companies"] = list(out["bills_files"].keys())
-    with open(os.path.join(d, "meta.json"), "w") as f:
-        json.dump(meta, f)
-
-    return jsonify({
-        "status": "ready",
-        "date_range": meta["date_range"],
-        "selected_companies": selected,
-        "companies": meta["companies"],
-        "bills_companies": meta["bills_companies"],
-        "stats": meta.get("stats", {}),
-    })
+    write_configure_status(job_id, {"status": "generating", "done": 0, "total": 0})
+    threading.Thread(target=run_configure, args=(job_id, selected), daemon=True).start()
+    return jsonify({"status": "generating"})
 
 
-def _combined_company_suffix(meta: dict) -> str:
-    """Comma-separated list of the companies actually present in the combined
-    workbook (those with at least one expense or bill), in the order the user
-    selected them. Empty string when none are present."""
-    present = set(meta.get("companies", [])) | set(meta.get("bills_companies", []))
-    ordered = [c for c in meta.get("selected_companies", []) if c in present]
-    for c in sorted(present):            # defensive: any present-but-unselected
-        if c not in ordered:
-            ordered.append(c)
-    return ", ".join(c.replace("/", "_").replace("\\", "_") for c in ordered)
+@app.route("/configure_status/<job_id>")
+def configure_status(job_id):
+    st = read_configure_status(job_id)
+    if not st:
+        return jsonify({"status": "not_found"}), 404
+    return jsonify(st)
 
 
 def _combined_download_name(meta: dict) -> str:
-    """Combined workbook filename, listing the companies it contains."""
-    suffix = _combined_company_suffix(meta)
-    label = f"Combined ({suffix})" if suffix else "Combined"
-    return f"PO Cost Changes - {label} - {meta['date_range']}.xlsx"
+    """Combined workbook filename."""
+    return f"PO Cost Changes - Combined - {meta['date_range']}.xlsx"
 
 
 @app.route("/download/<job_id>/combined")

@@ -1740,6 +1740,7 @@ def build_filtered_outputs(
     excluded_view: pd.DataFrame,
     date_range: str,
     selected_companies: list[str],
+    progress_cb=None,
 ) -> dict:
     """Build the output files for the chosen companies only.
 
@@ -1753,6 +1754,11 @@ def build_filtered_outputs(
                         (selected companies that have positive adjustments)
 
     `selected_companies` are the short sheet/file labels (e.g. "GK", "Y&S").
+
+    `progress_cb`, if given, is called `progress_cb(done, total)` after the
+    combined workbook and after each per-company file is built, so callers can
+    show generation progress. `total` = 1 (combined) + #expense files + #bills
+    files for the selection.
     """
     selected = set(selected_companies)
 
@@ -1767,26 +1773,44 @@ def build_filtered_outputs(
     # Selected labels in display order (drives the combined per-company tabs).
     selected_ordered = sorted(selected, key=_sort_key)
 
+    # Work out how many files we'll build so progress can report "done of total".
+    companies_with_expenses = (
+        set(expenses_df["_display_label"]) if "_display_label" in expenses_df.columns else set()
+    )
+    expense_labels = [n for n in selected_ordered if n in companies_with_expenses]
+    bills_label_set = (
+        {str(v) for v in pd_bills["_display_label"].unique()} & selected
+        if not pd_bills.empty else set()
+    )
+    total = 1 + len(expense_labels) + len(bills_label_set)
+    done = 0
+
+    def _tick():
+        nonlocal done
+        done += 1
+        if progress_cb:
+            try:
+                progress_cb(done, total)
+            except Exception:  # progress reporting must never break generation
+                pass
+
     combined_bytes = _build_combined_workbook(
         source_view, bills_df, expenses_df, selected_ordered, excluded_view,
         pd_bills_df=pd_bills,
     )
+    _tick()
 
     def _company_ledger(name: str) -> pd.DataFrame:
         b = bills_df[bills_df["_display_label"] == name] if "_display_label" in bills_df.columns else bills_df.iloc[0:0]
         e = expenses_df[expenses_df["_display_label"] == name] if "_display_label" in expenses_df.columns else expenses_df.iloc[0:0]
         return _combined_ledger(b, e)
 
-    companies_with_expenses = (
-        set(expenses_df["_display_label"]) if "_display_label" in expenses_df.columns else set()
-    )
-    company_files = {
-        name: _build_company_workbook(
+    company_files = {}
+    for name in expense_labels:
+        company_files[name] = _build_company_workbook(
             name, expenses_df, source_view, excluded_view, _company_ledger(name)
         )
-        for name in selected_ordered
-        if name in companies_with_expenses
-    }
+        _tick()
 
     bills_files: dict[str, bytes] = {}
     if not pd_bills.empty:
@@ -1798,6 +1822,7 @@ def build_filtered_outputs(
                 "Bills", grp_out, str(label), source_view, excluded_view,
                 _company_ledger(str(label)),
             )
+            _tick()
     bills_files = {k: bills_files[k] for k in sorted(bills_files.keys(), key=_sort_key)}
 
     return {

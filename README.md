@@ -85,10 +85,12 @@ natively. Zone 1 → Zone 2 is identical to uploading the raw file into Zone 2.
 3. UI polls `GET /status/<job_id>` until `done` or `error`.
 4. On done, the UI opens a **"Select companies"** modal (checkbox list of every
    QBO company, with Select all). The user picks which companies to include.
-5. `POST /configure/<job_id>` with the selected companies runs
-   `build_filtered_outputs()`, which builds the combined workbook, per-company
-   Expenses files, and per-company bills files for just those companies, and
-   writes them to disk.
+5. `POST /configure/<job_id>` with the selected companies kicks off a
+   background thread running `build_filtered_outputs()`, which builds the
+   combined workbook, per-company Expenses files, and per-company bills files
+   for just those companies and writes them to disk. The modal shows a progress
+   bar ("Generating files… X of N") by polling `GET /configure_status/<job_id>`
+   until `ready` or `error`.
 6. The UI then shows a date-range badge (US Central), a summary table, a
    "Download All (.zip)" button, and grids of per-company download buttons.
 
@@ -222,9 +224,7 @@ files' row counts and totals tie out exactly to it.
 
 ### Download filenames
 
-- Combined: `PO Cost Changes - Combined (<companies>) - <date>.xlsx`, where
-  `<companies>` lists every company present in that workbook (selection-
-  dependent, in the order picked).
+- Combined: `PO Cost Changes - Combined - <date>.xlsx`.
 - Per-company Expenses: `PO Cost Changes - Expenses - <Company> - <date>.xlsx`.
 - Per-company Bills: `PO Cost Changes - Bills - <Company> - <date>.xlsx`.
 
@@ -286,7 +286,8 @@ ones on Ticketmaster AM) are kept.
 | POST | `/convert_zip` | Zone 1: several raw exports → zip of Converted files |
 | POST | `/upload` | `{job_id}` — kicks off background processing |
 | GET | `/status/<job_id>` | `{status, date_range, all_companies, stats, excluded, ignored_companies, ...}` |
-| POST | `/configure/<job_id>` | `{selected_companies}` → builds the chosen companies' files; returns `{status, companies, bills_companies, ...}` |
+| POST | `/configure/<job_id>` | `{selected_companies}` → starts background file generation; returns `{status: "generating"}` |
+| GET | `/configure_status/<job_id>` | generation progress: `{status, done, total, ...}`; on `ready` also `{companies, bills_companies, ...}` |
 | GET | `/download/<job_id>/combined` | combined multi-tab xlsx |
 | GET | `/download/<job_id>/company/<name>` | one company's Expenses xlsx |
 | GET | `/download/<job_id>/bills/<name>` | one company's PD-format bills xlsx |
