@@ -1001,18 +1001,16 @@ def test_summary_sorted_by_date_then_vendor():
     ]
 
 
-def test_combined_download_name_lists_companies():
+def test_combined_download_name_is_plain():
     import app as appmod
     meta = {
         "date_range": "June 9th 2026",
         "selected_companies": ["GK", "YSA", "TL"],
-        "companies": ["GK", "YSA"],      # have expenses
-        "bills_companies": ["TL"],       # has bills only
+        "companies": ["GK", "YSA"],
+        "bills_companies": ["TL"],
     }
-    name = appmod._combined_download_name(meta)
-    assert name == "PO Cost Changes - Combined (GK, YSA, TL) - June 9th 2026.xlsx"
-
-    # No companies present → plain "Combined".
+    # Always plain "Combined" — no company names in the filename.
+    assert appmod._combined_download_name(meta) == "PO Cost Changes - Combined - June 9th 2026.xlsx"
     empty = {"date_range": "June 9th 2026", "selected_companies": [],
              "companies": [], "bills_companies": []}
     assert appmod._combined_download_name(empty) == "PO Cost Changes - Combined - June 9th 2026.xlsx"
@@ -1121,3 +1119,29 @@ def test_expense_numbers_are_random_8_digit_like_bill_numbers():
     assert exp and all(is8(n) for n in exp)
     assert all(v == 2 for v in Counter(exp).values())
     assert exp == sorted(exp)
+
+
+def test_mixed_precision_timestamp_still_same_day_excluded():
+    # Regression (Grossman PO 2426257): a row whose AdjustedDateTimeUTC lacks
+    # fractional seconds — while other rows in the column have them — must still
+    # parse and be caught by the same-day exclusion, not slip through as an
+    # unparseable NaT date. Both rows below share the same US-Central created and
+    # adjusted day, so both must be excluded.
+    rows = [
+        _row(PurchaseOrderID=999, CompanyName="YSA", PerformerName="P1", AccountEmail="a@x.com",
+             InitialTicketCostTotal=0, TicketCostTotal=50,
+             AdjustedDateTimeUTC="2026-06-22T20:05:51.497",   # with milliseconds
+             CreatedDate="2026-06-22T18:55:54.487", Remove=""),
+        _row(PurchaseOrderID=999, CompanyName="YSA", PerformerName="P2", AccountEmail="b@x.com",
+             InitialTicketCostTotal=0, TicketCostTotal=55,
+             AdjustedDateTimeUTC="2026-06-22T20:05:51",       # NO milliseconds — the bug case
+             CreatedDate="2026-06-22T18:55:54.487", Remove=""),
+    ]
+    res = processor.process_files([(_to_xlsx_bytes(rows, extra_cols=["Remove"]), "PO_Cost_Changes.xlsx")])
+    assert res["excluded"]["row_count"] == 2          # both excluded, incl. the no-ms row
+    out = processor.build_filtered_outputs(
+        res["_cleaned"], res["_source_view"], res["_excluded_view"],
+        res["date_range"], res["all_companies"],
+    )
+    assert "Asher" not in out["bills_files"]           # nothing survives -> no output files
+    assert "Asher" not in out["companies"]

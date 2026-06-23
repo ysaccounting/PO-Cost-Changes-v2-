@@ -226,7 +226,7 @@ def transform(
 
     # 2. Changed Type — coerce the columns that matter for math/comparison.
     out["PO #"] = pd.to_numeric(out["PO #"], errors="coerce").astype("Int64")
-    out["Adjustment Date"] = pd.to_datetime(out["Adjustment Date"], errors="coerce")
+    out["Adjustment Date"] = _parse_dt(out["Adjustment Date"])
     # Strip the time component — the source data has timestamps but every
     # row we care about is a per-day event, and the aggregation key
     # depends on dates matching exactly.
@@ -576,6 +576,29 @@ def _is_modified_format(df: pd.DataFrame) -> bool:
 # _filename_adjustment_date / the Adjustment Date override below).
 LOCAL_TZ = "America/Chicago"  # US Central
 
+
+def _parse_dt(series, utc: bool = False):
+    """Parse a column to datetime, tolerant of ISO-8601 strings with *mixed*
+    fractional-second precision (e.g. '2026-06-22T20:05:51' alongside
+    '2026-06-22T20:05:51.497').
+
+    Plain ``pd.to_datetime`` infers a single format from the column and then
+    coerces the odd-precision values to ``NaT`` — which silently dropped those
+    rows out of the same-day exclusion (a row with no parseable adjusted/created
+    date can never match). ``format="ISO8601"`` parses each ISO string regardless
+    of precision; blanks/None become ``NaT``. Columns that are already datetimes
+    are passed through unchanged (the ISO8601 format can't be applied to them).
+    """
+    if series is None:
+        return pd.NaT
+    s = series if isinstance(series, pd.Series) else pd.Series(series)
+    if pd.api.types.is_datetime64_any_dtype(s):
+        out = pd.to_datetime(s, errors="coerce")
+        if utc:
+            out = out.dt.tz_localize("UTC") if out.dt.tz is None else out.dt.tz_convert("UTC")
+        return out
+    return pd.to_datetime(s, errors="coerce", utc=utc, format="ISO8601")
+
 # Adjustment Date is overridden to the date in the filename. That YYYY-MM-DD is
 # the business date the cost changes belong to. Falls back to the row's UTC
 # timestamp (converted to local time) only when the filename has no date.
@@ -689,7 +712,7 @@ def _normalize_new_export(df: pd.DataFrame, filename: str) -> pd.DataFrame:
         # Fallback: UTC datetime → US Central → date only. tz_localize(None)
         # drops the tz so downstream comparisons / Excel writing get naive
         # datetimes.
-        ts = pd.to_datetime(df["AdjustedDateTimeUTC"], errors="coerce", utc=True)
+        ts = _parse_dt(df["AdjustedDateTimeUTC"], utc=True)
         out["Adjustment Date"] = (
             ts.dt.tz_convert(LOCAL_TZ).dt.tz_localize(None).dt.normalize()
         )
@@ -709,9 +732,9 @@ def _normalize_new_export(df: pd.DataFrame, filename: str) -> pd.DataFrame:
     # CreatedDate is never a match (those rows are kept). Computed here from the
     # raw timestamps; carried as a hidden helper (dropped before any sheet is
     # written) and folded into the exclusion mask in process_files.
-    adj_ct = pd.to_datetime(df["AdjustedDateTimeUTC"], errors="coerce", utc=True).dt.tz_convert(LOCAL_TZ)
+    adj_ct = _parse_dt(df["AdjustedDateTimeUTC"], utc=True).dt.tz_convert(LOCAL_TZ)
     if "CreatedDate" in df.columns:
-        cre_ct = pd.to_datetime(df["CreatedDate"], errors="coerce", utc=True).dt.tz_convert(LOCAL_TZ)
+        cre_ct = _parse_dt(df["CreatedDate"], utc=True).dt.tz_convert(LOCAL_TZ)
         same_day = (
             adj_ct.dt.normalize().eq(cre_ct.dt.normalize())
             & adj_ct.notna()
@@ -887,19 +910,19 @@ def _normalize_reupload(df: pd.DataFrame, filename: str) -> pd.DataFrame:
     else:
         out["Cancelled"] = pd.Series([""] * len(df), dtype="string")
 
-    out["Adjustment Date"] = pd.to_datetime(df.get("Adjustment Date"), errors="coerce")
+    out["Adjustment Date"] = _parse_dt(df.get("Adjustment Date"))
 
     out["AccountEmail"] = df["AccountEmail"].map(_clean_key_str) if "AccountEmail" in df.columns else ""
     out["ExtPONumber"] = df["ExtPONumber"].map(_clean_key_str) if "ExtPONumber" in df.columns else ""
 
     if "CreatedDate" in df.columns:
-        out["CreatedDate"] = pd.to_datetime(df["CreatedDate"], errors="coerce").dt.normalize()
+        out["CreatedDate"] = _parse_dt(df["CreatedDate"]).dt.normalize()
     else:
         out["CreatedDate"] = pd.NaT
 
     # Same-day exclusion — recompute from Adjustment Date vs CreatedDate at the
     # date level (both already US Central; blank CreatedDate never matches).
-    adj = pd.to_datetime(out["Adjustment Date"], errors="coerce").dt.normalize()
+    adj = _parse_dt(out["Adjustment Date"]).dt.normalize()
     cre = out["CreatedDate"]
     same_day = adj.eq(cre) & adj.notna() & cre.notna()
     out[EXCLUDE_SAME_DATE_COL] = same_day.fillna(False).to_numpy()
@@ -1870,7 +1893,7 @@ def convert_to_modified(file_bytes: bytes, filename: str) -> bytes:
     # Converted file processes identically (UTC→Central + same-day exclusion).
     for dcol in _MODIFIED_DATE_COLS:
         if dcol in out.columns:
-            parsed = pd.to_datetime(out[dcol], errors="coerce")
+            parsed = _parse_dt(out[dcol])
             if getattr(parsed.dtype, "tz", None) is not None:
                 parsed = parsed.dt.tz_localize(None)
             out[dcol] = parsed
