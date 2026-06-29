@@ -36,7 +36,6 @@ from vendor_rules import apply_vendor_pipeline, clean_ext_po
 # output data / QBO import).
 DISPLAY_NAMES: dict[str, str] = {
     "Y&S Tickets":         "Y&S",
-    "Damona & Crew":       "Damona",
     "The Ticket Guy LLC":  "Ticket Guy",
     "YourTickets":         "YourTickets",
     "YS Asher Tickets":    "YSA",
@@ -112,7 +111,6 @@ DISPLAY_ORDER: list[str] = [
     "Needle",      # not in reference; slotted with the other affiliates
     "TL",
     "Waxler",
-    "Damona",
     "YourTickets",  # always last
 ]
 
