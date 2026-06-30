@@ -1203,3 +1203,52 @@ def test_seasons_autotagged_on_bills_and_inventory_asset_expense_lines():
 
     pdb = processor.build_pd_bills(cleaned)                     # PD bills tagged too
     assert (pdb["Seasons"] == "LN Extras").all()
+
+
+def test_league_for_team_lookup():
+    import teams
+    teams.reset_cache()
+    assert teams.league_for_team("Los Angeles Lakers") == "NBA"
+    assert teams.league_for_team("Houston Rockets") == "NBA"
+    assert teams.league_for_team("Nobody In Particular") == ""
+    assert teams.league_for_team("State University Basketball") == "College"
+
+
+def _season_rows(event_dates, **over):
+    common = dict(CompanyName="Jacks YS", Vendor="Los Angeles Lakers",
+                  PerformerName="Los Angeles Lakers", Section="205", Row="10",
+                  StartSeat=5, EndSeat=6, AccountEmail="x@y.com",
+                  InitialTicketCostTotal=300, TicketCostTotal=0,  # negative -> expense
+                  CreatedDate=None)
+    common.update(over)
+    return [_row(PurchaseOrderID=2308881, EventDate=d, **common) for d in event_dates]
+
+
+def test_season_ticket_league_tagged_on_inventory_asset_line():
+    # Same seat across 3 distinct event dates -> season-ticket group -> NBA on
+    # the inventory-asset expense leg; the offset leg stays blank.
+    rows = _season_rows(["2026-05-20", "2026-06-05", "2026-06-13"])
+    res = processor.process_files([(_to_xlsx_bytes(rows), "PO_Cost_Changes_2026-06-29.xlsx")])
+    _, expenses = processor._build_bills_and_expenses(res["_cleaned"])
+    ia = expenses[expenses["Category"] == "Inventory Asset"]
+    off = expenses[expenses["Category"] != "Inventory Asset"]
+    assert len(ia) >= 1 and (ia["Seasons"] == "NBA").all()
+    assert (off["Seasons"] == "").all()
+
+
+def test_two_event_dates_is_not_a_season_ticket():
+    # Only 2 distinct event dates -> below the 3-date threshold -> no league tag.
+    rows = _season_rows(["2026-05-20", "2026-06-05"])
+    res = processor.process_files([(_to_xlsx_bytes(rows), "PO_Cost_Changes_2026-06-29.xlsx")])
+    _, expenses = processor._build_bills_and_expenses(res["_cleaned"])
+    ia = expenses[expenses["Category"] == "Inventory Asset"]
+    assert (ia["Seasons"] == "").all()
+
+
+def test_season_ticket_excluded_vendor_not_tagged():
+    # A resale-marketplace vendor is never league-tagged even if it spans 3+ dates.
+    rows = _season_rows(["2026-05-20", "2026-06-05", "2026-06-13"], Vendor="StubHub")
+    res = processor.process_files([(_to_xlsx_bytes(rows), "PO_Cost_Changes_2026-06-29.xlsx")])
+    _, expenses = processor._build_bills_and_expenses(res["_cleaned"])
+    ia = expenses[expenses["Category"] == "Inventory Asset"]
+    assert (ia["Seasons"] == "").all()

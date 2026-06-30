@@ -28,7 +28,7 @@ from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
 from mapping import get_mapping
-from teams import get_teams
+from teams import get_teams, get_team_leagues, league_for_team
 from vendors import get_tc_vendors, offset_category
 from vendor_rules import apply_vendor_pipeline, clean_ext_po
 
@@ -240,6 +240,14 @@ def transform(
     if "Cancelled" in out.columns:
         out["Cancelled"] = out["Cancelled"].fillna("")
 
+    # 2b. Season-ticket league tag — detect on the seat-level rows BEFORE the
+    #     seat detail is dropped at step 3. Carried through both aggregations as
+    #     the helper "_SeasonLeague" and used to auto-fill the Seasons column on
+    #     the Bills / inventory-asset Expense lines (matching the Purchase
+    #     Details app). Vendor here is still the raw vendor (the resale-vendor
+    #     exclusion in detection wants the raw names).
+    out["_SeasonLeague"] = _season_league_series(out)
+
     # 3. Removed Columns — drop seat-level detail.
     out = out.drop(columns=[c for c in SEAT_LEVEL_COLUMNS if c in out.columns])
 
@@ -343,6 +351,8 @@ def transform(
     _agg7 = {"Total Start": "sum", "Total End": "sum", "Total Adjustment": "sum"}
     if "CreatedDate" in out.columns:
         _agg7["CreatedDate"] = _collect_created_dates
+    if "_SeasonLeague" in out.columns:
+        _agg7["_SeasonLeague"] = _first_nonempty
     out = (
         out.groupby(GROUP_KEYS, dropna=False, as_index=False)
         .agg(_agg7)
@@ -377,6 +387,8 @@ def transform(
         }
         if "CreatedDate" in out.columns:
             _agg12["CreatedDate"] = _union_created_dates
+        if "_SeasonLeague" in out.columns:
+            _agg12["_SeasonLeague"] = _first_nonempty
         out = (
             out.groupby(AGGREGATION_KEYS, dropna=False, as_index=False)
             .agg(_agg12)
@@ -396,7 +408,7 @@ def transform(
             .reset_index(drop=True)
         )
 
-    cleaned = out[FINAL_COLUMNS]
+    cleaned = out[FINAL_COLUMNS + (["_SeasonLeague"] if "_SeasonLeague" in out.columns else [])]
     dropped_info = {
         "unmapped_companies": unmapped_counts,
         "total_dropped_rows": sum(unmapped_counts.values()),
@@ -689,6 +701,20 @@ def _normalize_new_export(df: pd.DataFrame, filename: str) -> pd.DataFrame:
     out = pd.DataFrame()
     for src, dst in NEW_COLUMN_MAP.items():
         out[dst] = df[src]
+
+    # Seat-level detail, kept only long enough for season-ticket detection in
+    # transform() (which drops these again at its step 3). Present in the raw
+    # export and in a Zone 1 converted file (after the Modified→raw rename).
+    if "EventDate" in df.columns:
+        out["Event Date"] = df["EventDate"]
+    if "Section" in df.columns:
+        out["Seat Section"] = df["Section"]
+    if "Row" in df.columns:
+        out["Seat Row"] = df["Row"]
+    if "StartSeat" in df.columns or "EndSeat" in df.columns:
+        ss = df["StartSeat"] if "StartSeat" in df.columns else pd.Series([""] * len(df))
+        es = df["EndSeat"] if "EndSeat" in df.columns else pd.Series([""] * len(df))
+        out["Seats"] = (ss.astype("string").fillna("") + "-" + es.astype("string").fillna(""))
 
     # Money: coerce to numeric, then derive the adjustment (End - Start).
     start = pd.to_numeric(out["Ticket Cost Total Start"], errors="coerce")
@@ -1064,6 +1090,92 @@ def _season_tag(vendor) -> str:
     return seasons + broadway
 
 
+# Resale-marketplace vendors excluded from season-ticket detection and from the
+# league tag (a season bought on a resale marketplace isn't a season-ticket
+# package). Matches the Purchase Details app. Lowercased.
+_SEASON_EXCLUDED_VENDORS = frozenset({
+    "ticketmaster", "tickpick", "stubhub", "ticket evolution", "gotickets",
+})
+
+# A seat that recurs across at least this many DISTINCT event dates is treated
+# as a season-ticket group.
+_SEASON_MIN_EVENT_DATES = 3
+
+
+def _season_league_series(df: pd.DataFrame) -> pd.Series:
+    """Per-row season-ticket league label for a seat-level frame.
+
+    A (Company, Team/Performer, Seat Section, Seat Row, Seats, AccountEmail)
+    group that spans >= _SEASON_MIN_EVENT_DATES distinct Event Dates is a
+    season-ticket group; its rows get the team's league (NBA/NFL/NHL/MLB/MLS/
+    College). Rows whose vendor is a resale marketplace are never counted or
+    labeled. Ported from the Purchase Details app. Returns "" where the seat
+    columns are absent or the row doesn't qualify.
+    """
+    key_cols = ["Company", "Team/Performer", "Seat Section", "Seat Row", "Seats", "AccountEmail"]
+    if any(c not in df.columns for c in key_cols) or "Event Date" not in df.columns:
+        return pd.Series([""] * len(df), index=df.index)
+
+    key = (
+        df["Company"].astype("string").fillna("") + "|" +
+        df["Team/Performer"].astype("string").fillna("") + "|" +
+        df["Seat Section"].astype("string").fillna("") + "|" +
+        df["Seat Row"].astype("string").fillna("") + "|" +
+        df["Seats"].astype("string").fillna("") + "|" +
+        df["AccountEmail"].astype("string").fillna("")
+    )
+    if "Vendor" in df.columns:
+        eligible = ~df["Vendor"].astype("string").str.strip().str.lower().isin(_SEASON_EXCLUDED_VENDORS)
+    else:
+        eligible = pd.Series(True, index=df.index)
+
+    ev = _parse_dt(df["Event Date"]).dt.normalize()
+    tmp = pd.DataFrame({"_key": key, "_ev": ev, "_elig": eligible})
+    counts = tmp[tmp["_elig"]].groupby("_key")["_ev"].nunique()
+    season_keys = set(counts[counts >= _SEASON_MIN_EVENT_DATES].index)
+
+    leagues = get_team_leagues()
+    return pd.Series(
+        [
+            league_for_team(t, leagues) if (e and k in season_keys) else ""
+            for k, t, e in zip(key, df["Team/Performer"], eligible)
+        ],
+        index=df.index,
+    )
+
+
+def _first_nonempty(s) -> str:
+    """Aggregator: first non-empty string in a group (used to carry the season
+    league through aggregation without splitting groups — the league is
+    team-consistent within a group, so any qualifying seat sets it)."""
+    for x in s:
+        if isinstance(x, str) and x:
+            return x
+    return ""
+
+
+def _seasons_value(vendor, league) -> str:
+    """Resolve the final 'Seasons' tag for a row: the vendor-based tag if any
+    (Live Nation / Broadway), else the season-ticket league — unless the final
+    vendor is a resale marketplace, which is never league-tagged."""
+    tag = _season_tag(vendor)
+    if tag:
+        return tag
+    if str(vendor).strip().lower() in _SEASON_EXCLUDED_VENDORS:
+        return ""
+    return league if isinstance(league, str) else ""
+
+
+def _seasons_col(frame: pd.DataFrame) -> list[str]:
+    """Build the 'Seasons' column for a bills/expenses frame from its Vendor and
+    carried-through _SeasonLeague helper."""
+    if "_SeasonLeague" in frame.columns:
+        league = frame["_SeasonLeague"]
+    else:
+        league = pd.Series([""] * len(frame), index=frame.index)
+    return [_seasons_value(v, l) for v, l in zip(frame["Vendor"], league)]
+
+
 def _build_bills_and_expenses(
     cleaned: pd.DataFrame,
     tc_vendors: set[str] | None = None,
@@ -1128,7 +1240,7 @@ def _build_bills_and_expenses(
         "Memo":        bills_src["_memo"],
         "Description": bills_src["_memo"],
         "Total":       bills_src["Total Adjustment"],
-        "Seasons":     bills_src["Vendor"].map(_season_tag),
+        "Seasons":     _seasons_col(bills_src),
     })
 
     # Expenses: negative adjustments → two rows each, summing to zero.
@@ -1145,7 +1257,7 @@ def _build_bills_and_expenses(
             "Memo":        exp_src["_memo"],
             "Description": exp_src["_memo"],
             "Total":       exp_src["Total Adjustment"],   # already negative
-            "Seasons":     exp_src["Vendor"].map(_season_tag),
+            "Seasons":     _seasons_col(exp_src),
         })
         # Line B — Vendor (TC) or Due from Vendors - Open, positive offset
         line_b = pd.DataFrame({
@@ -1557,7 +1669,7 @@ def build_pd_bills(cleaned: pd.DataFrame) -> pd.DataFrame:
         "Team/Performer": full,
         "Memo":           full,
         "Total Cost":     src["Total Adjustment"],
-        "Seasons":        src["Vendor"].map(_season_tag),
+        "Seasons":        _seasons_col(src),
         "_display_label": src["Company"].map(file_label),   # short label for per-company split
     })
     # Deterministic order: by company, then date, vendor, memo.

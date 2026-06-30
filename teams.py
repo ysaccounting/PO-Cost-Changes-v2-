@@ -59,9 +59,61 @@ def get_teams() -> set[str]:
     return load_teams()
 
 
+# Keywords that mark a (non-major-league) Team/Performer as a college team, so
+# season-ticket groups for college sports get a "College" label. Mirrors the
+# Purchase Details app.
+COLLEGE_KEYWORDS = ["college", "university", "football", "basketball", "hockey", "baseball"]
+
+
+def load_team_leagues(path: Path | str | None = None) -> dict[str, str]:
+    """Return a {team_lowercased: league} map from the major-league teams file.
+
+    The file's 'League' column holds the league (MLB, NBA, NFL, NHL, MLS). Used
+    to tag detected season-ticket groups with their league.
+    """
+    path = Path(path) if path else Path(os.getenv("TEAMS_PATH", DEFAULT_PATH))
+    if not path.exists():
+        log.warning("Teams file not found at %s; using empty league map.", path)
+        return {}
+    df = pd.read_excel(path)
+    if "Team" not in df.columns or "League" not in df.columns:
+        log.warning("Teams file at %s missing 'Team'/'League'; using empty league map.", path)
+        return {}
+    out: dict[str, str] = {}
+    for _, row in df.iterrows():
+        team = str(row["Team"]).strip()
+        league = str(row["League"]).strip()
+        if team and league and league.lower() != "nan":
+            out[team.lower()] = league
+    log.info("Loaded %d team→league entries from %s", len(out), path)
+    return out
+
+
+@lru_cache(maxsize=1)
+def get_team_leagues() -> dict[str, str]:
+    """Cached {team_lowercased: league} accessor."""
+    return load_team_leagues()
+
+
+def league_for_team(team_performer, leagues: dict[str, str] | None = None) -> str:
+    """Return the league label for a team ('MLB'/'NBA'/'NFL'/'NHL'/'MLS'), or
+    'College' for college teams (by keyword), or '' if neither. Case-insensitive."""
+    if not isinstance(team_performer, str):
+        return ""
+    if leagues is None:
+        leagues = get_team_leagues()
+    key = team_performer.strip().lower()
+    if key in leagues:
+        return leagues[key]
+    if any(kw in key for kw in COLLEGE_KEYWORDS):
+        return "College"
+    return ""
+
+
 def reset_cache() -> None:
-    """Clear the cache (used in tests)."""
+    """Clear the caches (used in tests)."""
     get_teams.cache_clear()
+    get_team_leagues.cache_clear()
 
 
 def rename_team_vendor(
