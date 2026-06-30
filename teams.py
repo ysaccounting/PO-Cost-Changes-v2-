@@ -22,6 +22,18 @@ log = logging.getLogger(__name__)
 
 DEFAULT_PATH = Path("data") / "major_league_teams.xlsx"
 
+# WNBA teams aren't in major_league_teams.xlsx, but the Purchase Details app
+# treats WNBA as a full major league. Supplied here in code so WNBA season-ticket
+# groups get a "WNBA" tag (and WNBA teams are rename-eligible) without a data-file
+# redeploy. Keys are lowercased; the data file wins on any future overlap.
+WNBA_TEAM_LEAGUES: dict[str, str] = {
+    "atlanta dream": "WNBA", "chicago sky": "WNBA", "connecticut sun": "WNBA",
+    "dallas wings": "WNBA", "golden state valkyries": "WNBA", "indiana fever": "WNBA",
+    "las vegas aces": "WNBA", "los angeles sparks": "WNBA", "minnesota lynx": "WNBA",
+    "new york liberty": "WNBA", "phoenix mercury": "WNBA", "seattle storm": "WNBA",
+    "washington mystics": "WNBA",
+}
+
 # Vendors that get rewritten to the Team/Performer when the performer is
 # a known major-league team. Stored lowercased for case-insensitive match.
 # To add a vendor to this rule, add its lowercased name here.
@@ -49,6 +61,7 @@ def load_teams(path: Path | str | None = None) -> set[str]:
         for t in df["Team"].dropna().tolist()
         if str(t).strip()
     }
+    teams |= set(WNBA_TEAM_LEAGUES)   # WNBA supplement (see constant above)
     log.info("Loaded %d teams from %s", len(teams), path)
     return teams
 
@@ -73,18 +86,19 @@ def load_team_leagues(path: Path | str | None = None) -> dict[str, str]:
     """
     path = Path(path) if path else Path(os.getenv("TEAMS_PATH", DEFAULT_PATH))
     if not path.exists():
-        log.warning("Teams file not found at %s; using empty league map.", path)
-        return {}
+        log.warning("Teams file not found at %s; using WNBA-only league map.", path)
+        return dict(WNBA_TEAM_LEAGUES)
     df = pd.read_excel(path)
     if "Team" not in df.columns or "League" not in df.columns:
-        log.warning("Teams file at %s missing 'Team'/'League'; using empty league map.", path)
-        return {}
+        log.warning("Teams file at %s missing 'Team'/'League'; using WNBA-only league map.", path)
+        return dict(WNBA_TEAM_LEAGUES)
     out: dict[str, str] = {}
     for _, row in df.iterrows():
         team = str(row["Team"]).strip()
         league = str(row["League"]).strip()
         if team and league and league.lower() != "nan":
             out[team.lower()] = league
+    out = {**WNBA_TEAM_LEAGUES, **out}   # WNBA supplement; file wins on overlap
     log.info("Loaded %d team→league entries from %s", len(out), path)
     return out
 

@@ -1210,6 +1210,8 @@ def test_league_for_team_lookup():
     teams.reset_cache()
     assert teams.league_for_team("Los Angeles Lakers") == "NBA"
     assert teams.league_for_team("Houston Rockets") == "NBA"
+    assert teams.league_for_team("New York Liberty") == "WNBA"     # WNBA supplement
+    assert teams.league_for_team("Las Vegas Aces") == "WNBA"
     assert teams.league_for_team("Nobody In Particular") == ""
     assert teams.league_for_team("State University Basketball") == "College"
 
@@ -1252,3 +1254,16 @@ def test_season_ticket_excluded_vendor_not_tagged():
     _, expenses = processor._build_bills_and_expenses(res["_cleaned"])
     ia = expenses[expenses["Category"] == "Inventory Asset"]
     assert (ia["Seasons"] == "").all()
+
+
+def test_wnba_season_ticket_tagged():
+    # WNBA isn't in the teams file but is supplied in code -> still tagged.
+    common = dict(CompanyName="Jacks YS", Vendor="New York Liberty",
+                  PerformerName="New York Liberty", Section="12", Row="A",
+                  StartSeat=1, EndSeat=2, AccountEmail="w@y.com",
+                  InitialTicketCostTotal=0, TicketCostTotal=80, CreatedDate=None)
+    rows = [_row(PurchaseOrderID=555, EventDate=d, **common)
+            for d in ["2026-06-01", "2026-06-08", "2026-06-15"]]
+    res = processor.process_files([(_to_xlsx_bytes(rows), "PO_Cost_Changes_2026-06-29.xlsx")])
+    pdb = processor.build_pd_bills(res["_cleaned"])
+    assert (pdb["Seasons"] == "WNBA").all()
